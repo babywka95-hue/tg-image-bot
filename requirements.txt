@@ -1,7 +1,13 @@
---index-url https://download.pytorch.org/whl/cpu
-flask
+# PyTorch CPU
+-f https://download.pytorch.org/whl/cpu
+torch==2.2.2
+
+# Обычные пакеты с PyPI
 python-telegram-bot[webhooks]==21.6
 requests
 pillow
-gunicorn
-torch==2.2.2
+flask
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
