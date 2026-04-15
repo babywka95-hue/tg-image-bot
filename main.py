@@ -7,6 +7,7 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
 URL = os.getenv("PUBLIC_URL")
+PORT = int(os.getenv("PORT", "10000"))
 
 if not TOKEN:
     raise Exception("BOT_TOKEN is missing")
@@ -26,9 +27,9 @@ def main():
 
     app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
+        port=PORT,
         url_path="webhook",
-        webhook_url=f"{URL}/webhook"
+        webhook_url=f"{URL}/webhook",
     )
 
 
