@@ -1,169 +1,136 @@
 import os
 import io
 import requests
-import torch
-import clip
 from PIL import Image
-from flask import Flask, request
 from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# --------------------
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+# =====================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # можно не ставить
 
-app = Flask(__name__)
+# =====================
+def wb_search(query, limit=10):
+    try:
+        url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
+        params = {
+            "query": query,
+            "page": 1,
+            "limit": limit,
+            "appType": 1,
+            "curr": "rub",
+            "dest": -1257786
+        }
 
-# --------------------
-device = "cpu"  # важно для Render free
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
 
-model, preprocess = clip.load("ViT-B/32", device=device)
+        products = data.get("data", {}).get("products", [])
+        results = []
 
-# --------------------
-def send(chat_id, text):
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
-    )
+        for p in products:
+            id_ = p.get("id")
+            name = p.get("name")
+            price = p.get("salePriceU", 0) // 100
 
-# --------------------
-def wb_search(query, limit=30):
-    url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
-    params = {"query": query, "page": 1, "limit": limit}
+            link = f"https://www.wildberries.ru/catalog/{id_}/detail.aspx"
 
-    r = requests.get(url, params=params, timeout=10)
-    if r.status_code != 200:
+            results.append(f"📦 {name}\n💰 {price} ₽\n🔗 {link}\n")
+
+        return results
+
+    except Exception as e:
+        print("WB error:", e)
         return []
 
-    return r.json().get("data", {}).get("products", [])
 
-# --------------------
-def get_image_embedding(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_input = preprocess(image).unsqueeze(0).to(device)
+# =====================
+def vision_to_query(image_bytes: bytes) -> str:
+    """
+    Превращаем фото → текстовый запрос
+    """
 
-    with torch.no_grad():
-        emb = model.encode_image(image_input)
-        emb /= emb.norm(dim=-1, keepdim=True)
+    # 🔥 если есть OpenAI — будет реально "Google Lens"
+    if OPENAI_API_KEY:
+        try:
+            import base64
 
-    return emb
+            b64 = base64.b64encode(image_bytes).decode()
 
-# --------------------
-def get_text_embedding(text):
-    text_input = clip.tokenize([text]).to(device)
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
 
-    with torch.no_grad():
-        emb = model.encode_text(text_input)
-        emb /= emb.norm(dim=-1, keepdim=True)
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Определи товар на фото и дай короткий поисковый запрос для Wildberries (3-6 слов на русском)."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                        ]
+                    }
+                ],
+                "max_tokens": 50
+            }
 
-    return emb
-
-# --------------------
-def similarity(a, b):
-    return (a @ b.T).item()
-
-# --------------------
-def build_candidates():
-    return [
-        "кроссовки",
-        "кеды",
-        "футболка",
-        "платье",
-        "куртка",
-        "сумка",
-        "часы",
-        "наушники",
-        "рюкзак",
-        "джинсы"
-    ]
-
-# --------------------
-def find_best_query(img_emb):
-    best_q = "товар"
-    best_score = -1
-
-    for q in build_candidates():
-        txt_emb = get_text_embedding(q)
-        score = similarity(img_emb, txt_emb)
-
-        if score > best_score:
-            best_score = score
-            best_q = q
-
-    return best_q
-
-# --------------------
-def build_links(products):
-    links = []
-
-    for p in products:
-        pid = p.get("id")
-        name = p.get("name")
-
-        if pid:
-            links.append(
-                f"{name}\nhttps://www.wildberries.ru/catalog/{pid}/detail.aspx"
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=20
             )
 
-    return links[:5]
+            return r.json()["choices"][0]["message"]["content"].strip()
 
-# --------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "WB Lens Bot running"
+        except Exception as e:
+            print("Vision error:", e)
 
-# --------------------
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    update = Update.de_json(data, None)
+    # fallback если нет API
+    return "женский товар одежда аксессуар"
 
-    if not update.message:
-        return "ok"
 
-    chat_id = update.message.chat.id
-
-    # ---------------- PHOTO ----------------
-    if update.message.photo:
-        send(chat_id, "🔍 Анализирую изображение...")
-
+# =====================
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
         photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        img_bytes = await file.download_as_bytearray()
 
-        file_info = requests.get(
-            f"https://api.telegram.org/bot{TOKEN}/getFile",
-            params={"file_id": photo.file_id}
-        ).json()
+        await update.message.reply_text("🔍 Анализирую фото...")
 
-        file_path = file_info["result"]["file_path"]
+        query = vision_to_query(img_bytes)
 
-        img_bytes = requests.get(
-            f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        ).content
+        await update.message.reply_text(f"🔎 Поиск: {query}")
 
-        # 1. embedding изображения
-        img_emb = get_image_embedding(img_bytes)
+        results = wb_search(query)
 
-        # 2. определяем категорию
-        query = find_best_query(img_emb)
+        if not results:
+            await update.message.reply_text("❌ Ничего не найдено")
+            return
 
-        send(chat_id, f"📦 Похоже на: {query}")
+        msg = "🛍 РЕЗУЛЬТАТЫ WB:\n\n" + "\n".join(results[:5])
 
-        # 3. поиск WB
-        products = wb_search(query)
+        await update.message.reply_text(msg)
 
-        if not products:
-            send(chat_id, "❌ Ничего не найдено")
-            return "ok"
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        print("handler error:", e)
 
-        # 4. ссылки
-        links = build_links(products)
 
-        send(chat_id, "🛍 Похожие товары:\n\n" + "\n\n".join(links))
+# =====================
+def main():
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN not set")
 
-    else:
-        send(chat_id, "Отправь фото товара 📸")
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    return "ok"
+    print("Bot started")
+    app.run_polling()
 
-# --------------------
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    main()
