@@ -2,27 +2,32 @@ import os
 import io
 import requests
 from PIL import Image
+from flask import Flask, request
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram import Bot, Update
 
 # --------------------
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 if not TOKEN:
-    raise Exception("TELEGRAM_TOKEN не задан")
+    raise Exception("No TELEGRAM_TOKEN")
+
+bot = Bot(token=TOKEN)
+
+app = Flask(__name__)
 
 # --------------------
 def wb_search(query, limit=100):
-    url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
-    params = {"query": query, "page": 1, "limit": limit}
-
     try:
+        url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
+        params = {"query": query, "page": 1, "limit": limit}
+
         r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return []
+
         data = r.json()
         return data.get("data", {}).get("products", [])
-    except Exception as e:
-        print("WB error:", e)
+    except:
         return []
 
 # --------------------
@@ -33,64 +38,68 @@ def analyze(products):
     total = len(products)
     strong = 0
     ultra = 0
-    avg = 0
+    avg_reviews = 0
 
     for p in products:
-        f = p.get("feedbacks", 0) or 0
-        avg += f
+        r = p.get("feedbacks", 0) or 0
+        avg_reviews += r
 
-        if f > 300:
+        if r > 300:
             strong += 1
-        if f > 1000:
+        if r > 1000:
             ultra += 1
 
-    avg = avg / total if total else 0
+    avg_reviews = avg_reviews / total
 
-    return {
-        "total": total,
-        "strong": strong,
-        "ultra": ultra,
-        "avg": avg
-    }
+    return total, strong, ultra, int(avg_reviews)
 
 # --------------------
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Анализ товара...")
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    update = Update.de_json(data, bot)
 
-    # 👉 пока используем универсальный запрос
-    query = "товар"
+    if update.message and update.message.photo:
+        chat_id = update.message.chat.id
 
-    products = wb_search(query)
-    stats = analyze(products)
+        bot.send_message(chat_id, "🔍 Анализируем...")
 
-    if not stats:
-        await update.message.reply_text("❌ Нет данных")
-        return
+        # простая логика без CLIP (чтобы не жрал память)
+        query = "товар"
 
-    msg = (
-        f"📊 АНАЛИЗ WB\n\n"
-        f"📦 Товаров: {stats['total']}\n"
-        f"💪 >300 отзывов: {stats['strong']}\n"
-        f"🔥 >1000 отзывов: {stats['ultra']}\n"
-        f"📈 Средние отзывы: {int(stats['avg'])}\n\n"
-    )
+        products = wb_search(query)
+        stats = analyze(products)
 
-    if stats["ultra"] > 5:
-        msg += "🚫 Вход сложный"
-    elif stats["strong"] > 10:
-        msg += "🟡 Средняя конкуренция"
-    else:
-        msg += "🟢 Можно заходить"
+        if not stats:
+            bot.send_message(chat_id, "❌ Нет данных")
+            return "ok"
 
-    await update.message.reply_text(msg)
+        total, strong, ultra, avg = stats
+
+        msg = (
+            f"📊 АНАЛИЗ\n\n"
+            f"📦 Товаров: {total}\n"
+            f"💪 >300 отзывов: {strong}\n"
+            f"🔥 >1000 отзывов: {ultra}\n"
+            f"📈 Средние: {avg}\n\n"
+        )
+
+        if ultra > 5:
+            msg += "🚫 Сложно"
+        elif strong > 10:
+            msg += "🟡 Средне"
+        else:
+            msg += "🟢 Можно заходить"
+
+        bot.send_message(chat_id, msg)
+
+    return "ok"
 
 # --------------------
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+@app.route("/")
+def home():
+    return "Bot is running"
 
-    print("Bot started")
-    app.run_polling()
-
+# --------------------
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=10000)
