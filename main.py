@@ -80,11 +80,19 @@ def home():
     return "OK"
 
 # =====================
-def set_webhook():
+import asyncio
+
+async def set_webhook():
     url = f"{WEBHOOK_URL}/webhook"
-    bot.delete_webhook()
-    bot.set_webhook(url=url)
-    print("Webhook:", url)
+    await bot.delete_webhook()
+    await bot.set_webhook(url=url)
+    print("Webhook set:", url)
+
+if __name__ == "__main__":
+    # запускаем Flask в отдельном потоке
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(set_webhook())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
 # =====================
 if __name__ == "__main__":
