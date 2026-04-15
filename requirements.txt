@@ -1,2 +1,9 @@
 python-telegram-bot==21.6
 Flask==2.3.3
+requests
+torch
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
+Pillow
