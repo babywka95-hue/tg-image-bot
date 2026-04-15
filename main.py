@@ -1,68 +1,98 @@
 import os
 import io
-import time
-from PIL import Image
+import requests
 import torch
 import clip
-
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+from PIL import Image
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# ---------------------
+# --------------------
 TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-CATEGORIES = ["epilator", "hair dryer", "sneakers", "smart watch", "backpack", "headphones"]
+# --------------------
+def wb_search(query, limit=100):
+    url = f"https://search.wb.ru/exactmatch/ru/common/v5/search?query={query}&page=1&limit={limit}"
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-# ---------------------
-def setup_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
-    return driver
+    r = requests.get(url, headers=headers, timeout=10)
+    if r.status_code != 200:
+        return []
 
-# ---------------------
-def parse_wb(query, limit=10):
-    driver = setup_driver()
-    query_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={query}"
-    driver.get(query_url)
-    time.sleep(3)  # дождаться загрузки страницы JS
+    data = r.json()
+    return data.get("data", {}).get("products", [])
 
-    products = []
-    items = driver.find_elements(By.CSS_SELECTOR, "div.product-card")
-    for item in items[:limit]:
-        try:
-            name = item.get_attribute("data-name")
-            price = item.get_attribute("data-sale")
-            reviews = int(item.get_attribute("data-feedbacks") or 0)
-            rating = float(item.get_attribute("data-rating") or 0)
-            link = item.get_attribute("href")
-            if reviews >= 1 and rating >= 4.0:
-                products.append({
-                    "name": name,
-                    "price": price,
-                    "reviews": reviews,
-                    "rating": rating,
-                    "link": link
-                })
-        except:
-            continue
+# --------------------
+def analyze(products):
+    if not products:
+        return None
 
-    driver.quit()
-    return products
+    total = len(products)
 
-# ---------------------
+    strong = 0        # >300 отзывов
+    ultra = 0         # >1000 отзывов
+    avg_reviews = 0
+
+    for p in products:
+        r = p.get("feedbacks", 0) or 0
+        avg_reviews += r
+
+        if r > 300:
+            strong += 1
+        if r > 1000:
+            ultra += 1
+
+    avg_reviews = avg_reviews / total if total else 0
+
+    return {
+        "total": total,
+        "strong": strong,
+        "ultra": ultra,
+        "avg_reviews": avg_reviews
+    }
+
+# --------------------
+def build_query_from_image(image_input):
+    """
+    Универсальный CLIP → текстовый запрос
+    """
+    prompts = [
+        "a product sold online",
+        "a household item",
+        "a beauty product",
+        "a fashion item",
+        "a tech gadget",
+        "a small consumer product"
+    ]
+
+    with torch.no_grad():
+        text = clip.tokenize(prompts).to(device)
+        text_f = model.encode_text(text)
+        text_f /= text_f.norm(dim=-1, keepdim=True)
+
+        img_f = model.encode_image(image_input)
+        img_f /= img_f.norm(dim=-1, keepdim=True)
+
+        sim = (img_f @ text_f.T).squeeze(0)
+        idx = sim.argmax().item()
+
+    # универсальные поисковые запросы WB
+    query_map = {
+        0: "product",
+        1: "home goods",
+        2: "beauty care",
+        3: "clothing",
+        4: "electronics",
+        5: "consumer goods"
+    }
+
+    return query_map[idx]
+
+# --------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -71,40 +101,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     image_input = preprocess(image).unsqueeze(0).to(device)
 
-    await update.message.reply_text("🔍 Определяю категорию товара...")
+    await update.message.reply_text("🔍 Анализ товара...")
 
-    with torch.no_grad():
-        text_inputs = clip.tokenize(CATEGORIES).to(device)
-        text_features = model.encode_text(text_inputs)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+    query = build_query_from_image(image_input)
 
-        image_features = model.encode_image(image_input)
-        image_features /= image_features.norm(dim=-1, keepdim=True)
+    await update.message.reply_text(f"📦 Поиск в WB: {query}")
 
-        similarity = (image_features @ text_features.T).squeeze(0)
-        idx = similarity.argmax().item()
-        query = CATEGORIES[idx]
+    products = wb_search(query, limit=100)
+    stats = analyze(products)
 
-    await update.message.reply_text(f"🔑 Категория: {query}")
-
-    products = parse_wb(query, limit=10)
-    if not products:
-        await update.message.reply_text("❌ Нет товаров с рейтингом ≥4 и отзывами ≥1")
+    if not stats:
+        await update.message.reply_text("❌ Нет данных")
         return
 
-    msg = "🛍 ТОП товаров WB:\n\n"
-    for p in products:
-        msg += f"• {p['name']}\n"
-        msg += f"⭐ {p['rating']} | 💬 {p['reviews']}\n"
-        msg += f"💰 {p['price']} ₽\n"
-        msg += f"🔗 {p['link']}\n\n"
+    msg = f"""
+📊 АНАЛИЗ WB ТОВАРА
+
+📦 Похожие товаров: {stats['total']}
+💪 Сильные конкуренты (>300 отзывов): {stats['strong']}
+🔥 Монстры (>1000 отзывов): {stats['ultra']}
+📈 Средние отзывы: {int(stats['avg_reviews'])}
+
+"""
+
+    if stats["ultra"] > 5:
+        msg += "🚫 ВХОД ОЧЕНЬ СЛОЖНЫЙ"
+    elif stats["strong"] > 10:
+        msg += "🟡 СРЕДНЯЯ КОНКУРЕНЦИЯ"
+    else:
+        msg += "🟢 МОЖНО ЗАХОДИТЬ"
 
     await update.message.reply_text(msg)
 
-# ---------------------
+# --------------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
     print("Bot started")
     app.run_polling()
 
