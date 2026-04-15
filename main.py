@@ -1,8 +1,8 @@
 import os
 import io
-import json
 import logging
 import requests
+from bs4 import BeautifulSoup
 from PIL import Image
 import torch
 import clip
@@ -17,40 +17,65 @@ TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# LOAD CLIP MODEL
+# LOAD CLIP
 # ======================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
 # ======================
-# WB PARSER
+# PARSE WB CARD
 # ======================
-def search_wb(query, limit=20):
-    """Парсинг Wildberries карточек по ключевому слову"""
+def get_wb_card_data(product_id):
+    url = f"https://www.wildberries.ru/catalog/{product_id}/detail.aspx"
     headers = {"User-Agent": "Mozilla/5.0"}
-    # Публичный поиск через JSON выдачу
-    url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&page=1&count={limit}"
 
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        # В WT есть JSON с карточкой
+        script = soup.find("script", {"id": "__NEXT_DATA__"})
+        if not script:
+            return None
+        data = json.loads(script.string)
+        product = data["props"]["pageProps"]["product"]
+        reviews = product.get("feedbacks", 0)
+        rating = product.get("rating", 0)
+        name = product.get("name", "")
+        price = product.get("salePriceU", 0)/100
+        return {
+            "name": name,
+            "reviews": reviews,
+            "rating": rating,
+            "price": price,
+            "link": url
+        }
+    except Exception as e:
+        print("WB card parse error:", e)
+        return None
+
+# ======================
+# WB SEARCH
+# ======================
+def search_wb(query, limit=10):
+    url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&page=1&count={limit}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
         products = []
         for item in data.get("data", {}).get("products", []):
-            products.append({
-                "name": item.get("name"),
-                "price": item.get("salePriceU") / 100 if item.get("salePriceU") else None,
-                "reviews": item.get("feedbacks") or 0,
-                "rating": item.get("rating") or 0,
-                "link": f"https://www.wildberries.ru/catalog/{item.get('id')}/detail.aspx"
-            })
+            card = get_wb_card_data(item.get("id"))
+            if card:
+                products.append(card)
         return products
     except Exception as e:
-        print("WB parse error:", e)
+        print("WB search error:", e)
         return []
 
 # ======================
-# ФИЛЬТР
+# FILTER
 # ======================
 def filter_products(products):
     filtered = []
@@ -58,8 +83,6 @@ def filter_products(products):
         if not p["name"]:
             continue
         if p["reviews"] <= 0:
-            continue
-        if p["rating"] <= 0:
             continue
         if p["rating"] < 4.0:
             continue
@@ -80,7 +103,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Определяю категорию товара...")
 
-    # CLIP: определяем категорию
     categories = ["epilator", "hair dryer", "sneakers", "smart watch", "backpack", "headphones"]
     text_inputs = clip.tokenize(categories).to(device)
 
@@ -97,15 +119,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"🔑 Ключевое слово: {query}")
 
-    # WB поиск
     products = search_wb(query, limit=20)
     products = filter_products(products)
 
     if not products:
-        await update.message.reply_text("❌ Нет товаров с отзывами и рейтингом ≥ 4.0")
+        await update.message.reply_text("❌ Нет товаров с отзывами ≥ 1 и рейтингом ≥ 4.0")
         return
 
-    # Вывод топ 5 товаров
     msg = "🛍 ТОП товаров WB:\n\n"
     for p in products[:5]:
         msg += f"• {p['name']}\n"
