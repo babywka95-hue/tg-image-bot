@@ -1,20 +1,35 @@
 import os
-from telegram import Update
+from fastapi import FastAPI, Request
+from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+app = FastAPI()
+bot = Bot(token=TOKEN)
+
+application = Application.builder().token(TOKEN).build()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен 🚀")
+    await update.message.reply_text("Бот работает 🚀")
 
-def main():
-    app = Application.builder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", start))
 
-    app.add_handler(CommandHandler("start", start))
 
-    print("Bot started")
+@app.get("/")
+def home():
+    return "Bot is alive"
 
-    app.run_polling()
 
-if __name__ == "__main__":
-    main()
+@app.post("/")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, bot)
+    await application.process_update(update)
+    return {"ok": True}
+
+
+@app.on_event("startup")
+async def startup():
+    await application.initialize()
+    await bot.set_webhook(os.getenv("WEBHOOK_URL"))
