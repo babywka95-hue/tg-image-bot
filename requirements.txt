@@ -1,0 +1,8 @@
+python-telegram-bot==20.7
+requests
+pillow
+torch
+torchvision
+ftfy
+regex
+tqdm
