@@ -1,32 +1,17 @@
 import os
 import io
 import requests
-import torch
-import clip
-from PIL import Image
-
 from flask import Flask, request
 
-# --------------------
-app = Flask(__name__)
+from telegram import Update, Bot
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
+# --------------------
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://xxx.onrender.com
 
-API = f"https://api.telegram.org/bot{TOKEN}"
-
-# --------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load("ViT-B/32", device=device)
-
-
-# --------------------
-def send_message(chat_id, text):
-    requests.post(
-        f"{API}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
-    )
-
+bot = Bot(token=TOKEN)
+app = Flask(__name__)
 
 # --------------------
 def wb_search(query, limit=50):
@@ -35,7 +20,6 @@ def wb_search(query, limit=50):
     if r.status_code != 200:
         return []
     return r.json().get("data", {}).get("products", [])
-
 
 # --------------------
 def analyze(products):
@@ -50,6 +34,7 @@ def analyze(products):
     for p in products:
         r = p.get("feedbacks", 0) or 0
         avg += r
+
         if r > 300:
             strong += 1
         if r > 1000:
@@ -57,113 +42,78 @@ def analyze(products):
 
     avg = avg / total if total else 0
 
-    return total, strong, ultra, avg
-
+    return {
+        "total": total,
+        "strong": strong,
+        "ultra": ultra,
+        "avg": avg
+    }
 
 # --------------------
-def build_query_from_image(image_input):
-    prompts = [
-        "a product",
-        "a household item",
-        "a beauty product",
-        "a clothing item",
-        "a gadget",
-        "a consumer product"
-    ]
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📦 Анализ... (без ML версия)")
 
-    with torch.no_grad():
-        text = clip.tokenize(prompts).to(device)
-        text_f = model.encode_text(text)
-        text_f /= text_f.norm(dim=-1, keepdim=True)
+    # упрощённый запрос (без CLIP)
+    query = "product"
 
-        img_f = model.encode_image(image_input)
-        img_f /= img_f.norm(dim=-1, keepdim=True)
+    products = wb_search(query)
+    stats = analyze(products)
 
-        sim = (img_f @ text_f.T).squeeze(0)
-        idx = sim.argmax().item()
+    if not stats:
+        await update.message.reply_text("Нет данных")
+        return
 
-    return ["product", "home goods", "beauty", "clothes", "electronics", "goods"][idx]
+    msg = (
+        f"📊 WB АНАЛИЗ\n\n"
+        f"📦 товаров: {stats['total']}\n"
+        f"💪 сильные: {stats['strong']}\n"
+        f"🔥 монстры: {stats['ultra']}\n"
+        f"📈 средние отзывы: {int(stats['avg'])}\n\n"
+    )
 
+    if stats["ultra"] > 5:
+        msg += "🚫 сложно зайти"
+    elif stats["strong"] > 10:
+        msg += "🟡 средняя конкуренция"
+    else:
+        msg += "🟢 можно заходить"
+
+    await update.message.reply_text(msg)
+
+# --------------------
+async def telegram_webhook(request_data):
+    update = Update.de_json(request_data, bot)
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    await application.initialize()
+    await application.process_update(update)
+    await application.shutdown()
 
 # --------------------
 @app.route("/", methods=["GET"])
 def home():
-    return "OK", 200
-
+    return "Bot is running"
 
 # --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
 
-    if "message" not in data:
-        return "ok", 200
+    import asyncio
+    asyncio.run(telegram_webhook(data))
 
-    msg = data["message"]
-    chat_id = msg["chat"]["id"]
-
-    # ---------------- TEXT
-    if "text" in msg:
-        send_message(chat_id, f"📩 Ты написал: {msg['text']}")
-        return "ok", 200
-
-    # ---------------- PHOTO
-    if "photo" in msg:
-        file_id = msg["photo"][-1]["file_id"]
-
-        file = requests.get(f"{API}/getFile", params={"file_id": file_id}).json()
-        file_path = file["result"]["file_path"]
-
-        img_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-        img_bytes = requests.get(img_url).content
-
-        image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        image_input = preprocess(image).unsqueeze(0).to(device)
-
-        send_message(chat_id, "🔍 Анализ товара...")
-
-        query = build_query_from_image(image_input)
-        send_message(chat_id, f"📦 Поиск WB: {query}")
-
-        products = wb_search(query)
-        stats = analyze(products)
-
-        if not stats:
-            send_message(chat_id, "❌ Нет данных")
-            return "ok", 200
-
-        total, strong, ultra, avg = stats
-
-        msg_text = f"""
-📊 АНАЛИЗ WB
-
-📦 Товаров: {total}
-💪 >300 отзывов: {strong}
-🔥 >1000 отзывов: {ultra}
-📈 Средние отзывы: {int(avg)}
-"""
-
-        if ultra > 5:
-            msg_text += "\n🚫 СЛОЖНАЯ НИША"
-        elif strong > 10:
-            msg_text += "\n🟡 СРЕДНЯЯ КОНКУРЕНЦИЯ"
-        else:
-            msg_text += "\n🟢 МОЖНО ЗАХОДИТЬ"
-
-        send_message(chat_id, msg_text)
-
-    return "ok", 200
-
+    return "ok"
 
 # --------------------
 def set_webhook():
-    requests.get(
-        f"{API}/setWebhook",
-        params={"url": f"{PUBLIC_URL}/webhook"}
-    )
-
+    url = f"{WEBHOOK_URL}/webhook"
+    bot.delete_webhook()
+    bot.set_webhook(url=url)
+    print("Webhook set:", url)
 
 # --------------------
 if __name__ == "__main__":
     set_webhook()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
