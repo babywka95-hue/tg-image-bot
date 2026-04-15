@@ -1,6 +1,7 @@
+--index-url https://download.pytorch.org/whl/cpu
 flask
 python-telegram-bot[webhooks]==21.6
 requests
 pillow
 gunicorn
-torch==2.2.2+cpu
+torch==2.2.2
