@@ -7,10 +7,12 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # --------------------
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TOKEN:
+    raise Exception("TELEGRAM_TOKEN не задан в Environment")
 
 # --------------------
-# SAFE IMPORT torch + clip (ВАЖНО ДЛЯ RENDER)
 torch = None
 clip = None
 model = None
@@ -27,29 +29,21 @@ try:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, preprocess = clip.load("ViT-B/32", device=device)
 
-    print("✅ CLIP loaded successfully")
+    print("CLIP loaded")
 
 except Exception as e:
-    print("⚠️ CLIP disabled:", e)
-    model = None
-    preprocess = None
-    device = "cpu"
+    print("CLIP disabled:", e)
 
 # --------------------
 def wb_search(query, limit=100):
+    url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
+    params = {"query": query, "page": 1, "limit": limit}
+
     try:
-        url = f"https://search.wb.ru/exactmatch/ru/common/v5/search"
-        params = {"query": query, "page": 1, "limit": limit}
-
         r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return []
-
         data = r.json()
         return data.get("data", {}).get("products", [])
-
-    except Exception as e:
-        print("WB error:", e)
+    except:
         return []
 
 # --------------------
@@ -57,126 +51,86 @@ def analyze(products):
     if not products:
         return None
 
-    total = len(products)
     strong = 0
     ultra = 0
-    avg_reviews = 0
+    total = len(products)
+    avg = 0
 
     for p in products:
-        r = p.get("feedbacks", 0) or 0
-        avg_reviews += r
+        f = p.get("feedbacks", 0) or 0
+        avg += f
 
-        if r > 300:
+        if f > 300:
             strong += 1
-        if r > 1000:
+        if f > 1000:
             ultra += 1
 
-    avg_reviews = avg_reviews / total
+    avg = avg / total if total else 0
 
     return {
         "total": total,
         "strong": strong,
         "ultra": ultra,
-        "avg_reviews": avg_reviews
+        "avg": avg
     }
 
 # --------------------
-def build_query_from_image(image_input):
-    """
-    CLIP → запрос (если CLIP есть)
-    fallback → если нет CLIP
-    """
-
+def build_query(image_input):
     if model is None:
         return "product"
 
     prompts = [
-        "a product sold online",
-        "a household item",
-        "a beauty product",
-        "a fashion item",
-        "a tech gadget",
-        "a small consumer product"
+        "product", "home item", "beauty product",
+        "clothing item", "electronics", "consumer goods"
     ]
 
     with torch.no_grad():
         text = clip.tokenize(prompts).to(device)
-        text_f = model.encode_text(text)
-        text_f /= text_f.norm(dim=-1, keepdim=True)
+        t = model.encode_text(text)
+        t /= t.norm(dim=-1, keepdim=True)
 
-        img_f = model.encode_image(image_input)
-        img_f /= img_f.norm(dim=-1, keepdim=True)
+        i = model.encode_image(image_input)
+        i /= i.norm(dim=-1, keepdim=True)
 
-        sim = (img_f @ text_f.T).squeeze(0)
-        idx = sim.argmax().item()
-
-    query_map = {
-        0: "product",
-        1: "home goods",
-        2: "beauty",
-        3: "clothing",
-        4: "electronics",
-        5: "goods"
-    }
-
-    return query_map.get(idx, "product")
+        sim = (i @ t.T).squeeze(0)
+        return prompts[sim.argmax().item()]
 
 # --------------------
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        img_bytes = await file.download_as_bytearray()
+async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    img = await file.download_as_bytearray()
 
-        image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    image = Image.open(io.BytesIO(img)).convert("RGB")
 
-        await update.message.reply_text("🔍 Анализируем товар...")
+    await update.message.reply_text("Анализ...")
 
-        image_input = None
+    image_input = None
+    if model and preprocess:
+        image_input = preprocess(image).unsqueeze(0).to(device)
 
-        if preprocess is not None and model is not None:
-            image_input = preprocess(image).unsqueeze(0).to(device)
+    query = build_query(image_input)
 
-        query = build_query_from_image(image_input)
+    products = wb_search(query)
+    stats = analyze(products)
 
-        await update.message.reply_text(f"📦 Поиск WB: {query}")
+    if not stats:
+        await update.message.reply_text("Нет данных")
+        return
 
-        products = wb_search(query, limit=100)
-        stats = analyze(products)
+    msg = (
+        f"Товаров: {stats['total']}\n"
+        f">300 отзывов: {stats['strong']}\n"
+        f">1000 отзывов: {stats['ultra']}\n"
+        f"Средние: {int(stats['avg'])}\n"
+    )
 
-        if not stats:
-            await update.message.reply_text("❌ Нет данных")
-            return
-
-        msg = (
-            f"📊 АНАЛИЗ WB\n\n"
-            f"📦 Товаров: {stats['total']}\n"
-            f"💪 >300 отзывов: {stats['strong']}\n"
-            f"🔥 >1000 отзывов: {stats['ultra']}\n"
-            f"📈 Средние отзывы: {int(stats['avg_reviews'])}\n\n"
-        )
-
-        if stats["ultra"] > 5:
-            msg += "🚫 Вход сложный"
-        elif stats["strong"] > 10:
-            msg += "🟡 Средняя конкуренция"
-        else:
-            msg += "🟢 Можно заходить"
-
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        print("handler error:", e)
+    await update.message.reply_text(msg)
 
 # --------------------
 def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN not set")
-
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handler))
 
     print("Bot started")
     app.run_polling()
