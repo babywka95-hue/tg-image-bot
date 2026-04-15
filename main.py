@@ -23,42 +23,34 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
 # ======================
-# WB SEARCH FUNCTION
+# WB PARSER
 # ======================
-def search_wb(query, limit=10):
-    """
-    Поиск товаров на Wildberries по ключевым словам.
-    Использует публичный поиск JSON
-    """
+def search_wb(query, limit=20):
+    """Парсинг Wildberries карточек по ключевому слову"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    # Публичный поиск через JSON выдачу
     url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&page=1&count={limit}"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return []
 
     try:
-        data = response.json()
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
         products = []
-
         for item in data.get("data", {}).get("products", []):
             products.append({
                 "name": item.get("name"),
-                "price": item.get("priceU") / 100 if item.get("priceU") else None,
+                "price": item.get("salePriceU") / 100 if item.get("salePriceU") else None,
                 "reviews": item.get("feedbacks") or 0,
                 "rating": item.get("rating") or 0,
                 "link": f"https://www.wildberries.ru/catalog/{item.get('id')}/detail.aspx"
             })
-
         return products
     except Exception as e:
         print("WB parse error:", e)
         return []
 
 # ======================
-# FILTER FUNCTION
+# ФИЛЬТР
 # ======================
 def filter_products(products):
     filtered = []
@@ -72,7 +64,6 @@ def filter_products(products):
         if p["rating"] < 4.0:
             continue
         filtered.append(p)
-    # сортировка по рейтингу и отзывам
     filtered.sort(key=lambda x: (x["rating"], x["reviews"]), reverse=True)
     return filtered
 
@@ -87,12 +78,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image_input = preprocess(image).unsqueeze(0).to(device)
 
-    await update.message.reply_text("🔍 Определяю товар...")
+    await update.message.reply_text("🔍 Определяю категорию товара...")
 
-    # CLIP: преобразуем в текстовую категорию
+    # CLIP: определяем категорию
+    categories = ["epilator", "hair dryer", "sneakers", "smart watch", "backpack", "headphones"]
+    text_inputs = clip.tokenize(categories).to(device)
+
     with torch.no_grad():
-        categories = ["epilator", "hair dryer", "sneakers", "smart watch", "backpack", "headphones"]
-        text_inputs = clip.tokenize(categories).to(device)
         text_features = model.encode_text(text_inputs)
         text_features /= text_features.norm(dim=-1, keepdim=True)
 
@@ -103,17 +95,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         top_idx = similarity.argmax().item()
         query = categories[top_idx]
 
-    await update.message.reply_text(f"🔑 Определено ключевое слово: {query}")
+    await update.message.reply_text(f"🔑 Ключевое слово: {query}")
 
-    # WB SEARCH
+    # WB поиск
     products = search_wb(query, limit=20)
     products = filter_products(products)
 
     if not products:
-        await update.message.reply_text("❌ Нет товаров с отзывами и рейтингом > 4.0")
+        await update.message.reply_text("❌ Нет товаров с отзывами и рейтингом ≥ 4.0")
         return
 
-    msg = "🛍 ТОП товаров WB с отзывами:\n\n"
+    # Вывод топ 5 товаров
+    msg = "🛍 ТОП товаров WB:\n\n"
     for p in products[:5]:
         msg += f"• {p['name']}\n"
         msg += f"⭐ Рейтинг: {p['rating']}, 💬 Отзывы: {p['reviews']}\n"
