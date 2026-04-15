@@ -10,29 +10,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TOKEN:
-    raise Exception("TELEGRAM_TOKEN не задан в Environment")
-
-# --------------------
-torch = None
-clip = None
-model = None
-preprocess = None
-device = "cpu"
-
-try:
-    import torch as _torch
-    import clip as _clip
-
-    torch = _torch
-    clip = _clip
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = clip.load("ViT-B/32", device=device)
-
-    print("CLIP loaded")
-
-except Exception as e:
-    print("CLIP disabled:", e)
+    raise Exception("TELEGRAM_TOKEN не задан")
 
 # --------------------
 def wb_search(query, limit=100):
@@ -43,7 +21,8 @@ def wb_search(query, limit=100):
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
         return data.get("data", {}).get("products", [])
-    except:
+    except Exception as e:
+        print("WB error:", e)
         return []
 
 # --------------------
@@ -51,9 +30,9 @@ def analyze(products):
     if not products:
         return None
 
+    total = len(products)
     strong = 0
     ultra = 0
-    total = len(products)
     avg = 0
 
     for p in products:
@@ -75,62 +54,40 @@ def analyze(products):
     }
 
 # --------------------
-def build_query(image_input):
-    if model is None:
-        return "product"
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Анализ товара...")
 
-    prompts = [
-        "product", "home item", "beauty product",
-        "clothing item", "electronics", "consumer goods"
-    ]
-
-    with torch.no_grad():
-        text = clip.tokenize(prompts).to(device)
-        t = model.encode_text(text)
-        t /= t.norm(dim=-1, keepdim=True)
-
-        i = model.encode_image(image_input)
-        i /= i.norm(dim=-1, keepdim=True)
-
-        sim = (i @ t.T).squeeze(0)
-        return prompts[sim.argmax().item()]
-
-# --------------------
-async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    img = await file.download_as_bytearray()
-
-    image = Image.open(io.BytesIO(img)).convert("RGB")
-
-    await update.message.reply_text("Анализ...")
-
-    image_input = None
-    if model and preprocess:
-        image_input = preprocess(image).unsqueeze(0).to(device)
-
-    query = build_query(image_input)
+    # 👉 пока используем универсальный запрос
+    query = "товар"
 
     products = wb_search(query)
     stats = analyze(products)
 
     if not stats:
-        await update.message.reply_text("Нет данных")
+        await update.message.reply_text("❌ Нет данных")
         return
 
     msg = (
-        f"Товаров: {stats['total']}\n"
-        f">300 отзывов: {stats['strong']}\n"
-        f">1000 отзывов: {stats['ultra']}\n"
-        f"Средние: {int(stats['avg'])}\n"
+        f"📊 АНАЛИЗ WB\n\n"
+        f"📦 Товаров: {stats['total']}\n"
+        f"💪 >300 отзывов: {stats['strong']}\n"
+        f"🔥 >1000 отзывов: {stats['ultra']}\n"
+        f"📈 Средние отзывы: {int(stats['avg'])}\n\n"
     )
+
+    if stats["ultra"] > 5:
+        msg += "🚫 Вход сложный"
+    elif stats["strong"] > 10:
+        msg += "🟡 Средняя конкуренция"
+    else:
+        msg += "🟢 Можно заходить"
 
     await update.message.reply_text(msg)
 
 # --------------------
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.PHOTO, handler))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
     app.run_polling()
