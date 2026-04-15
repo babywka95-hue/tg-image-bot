@@ -2,23 +2,15 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-async def test_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Просто отвечает на любое сообщение.
-    Это проверка, что бот живой.
-    """
-    await update.message.reply_text("✅ БОТ ЖИВОЙ! Render Background Worker работает.")
+print("TOKEN:", TELEGRAM_TOKEN)
 
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Бот работает!")
 
-    # реагирует на все сообщения (текст, фото, стикеры)
-    app.add_handler(MessageHandler(filters.ALL, test_message))
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(MessageHandler(filters.ALL, handle))
 
-    print("Bot started")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+print("🚀 Bot started")
+app.run_polling()
