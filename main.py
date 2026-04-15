@@ -6,18 +6,13 @@ from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# --------------------
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TOKEN:
     raise Exception("TELEGRAM_TOKEN is missing")
 
-# --------------------
-def simple_image_classifier(image: Image.Image):
-    """
-    Лёгкая эвристика вместо CLIP
-    """
 
+def simple_image_classifier(image: Image.Image):
     image = image.convert("RGB")
     pixels = list(image.getdata())
 
@@ -27,7 +22,6 @@ def simple_image_classifier(image: Image.Image):
 
     brightness = (avg_r + avg_g + avg_b) / 3
 
-    # простая логика классификации
     if brightness > 180:
         return "beauty product"
     elif avg_r > avg_g and avg_r > avg_b:
@@ -37,7 +31,7 @@ def simple_image_classifier(image: Image.Image):
     else:
         return "household item"
 
-# --------------------
+
 def wb_search(query, limit=50):
     url = f"https://search.wb.ru/exactmatch/ru/common/v5/search?query={query}&page=1&limit={limit}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -46,10 +40,9 @@ def wb_search(query, limit=50):
     if r.status_code != 200:
         return []
 
-    data = r.json()
-    return data.get("data", {}).get("products", [])
+    return r.json().get("data", {}).get("products", [])
 
-# --------------------
+
 def analyze(products):
     if not products:
         return None
@@ -68,16 +61,14 @@ def analyze(products):
         if r > 1000:
             ultra += 1
 
-    avg_reviews = avg_reviews / total if total else 0
-
     return {
         "total": total,
         "strong": strong,
         "ultra": ultra,
-        "avg_reviews": avg_reviews
+        "avg_reviews": avg_reviews / total
     }
 
-# --------------------
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -85,13 +76,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     image = Image.open(io.BytesIO(img_bytes))
 
-    await update.message.reply_text("🔍 Анализ изображения...")
+    await update.message.reply_text("🔍 Анализ...")
 
     query = simple_image_classifier(image)
 
-    await update.message.reply_text(f"📦 Поиск WB: {query}")
+    await update.message.reply_text(f"📦 WB поиск: {query}")
 
-    products = wb_search(query, limit=50)
+    products = wb_search(query)
     stats = analyze(products)
 
     if not stats:
@@ -99,30 +90,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = (
-        f"📊 АНАЛИЗ WB\n\n"
+        f"📊 WB АНАЛИЗ\n\n"
         f"📦 Товаров: {stats['total']}\n"
-        f"💪 Сильные (>300 отзывов): {stats['strong']}\n"
-        f"🔥 Монстры (>1000 отзывов): {stats['ultra']}\n"
-        f"📈 Средние отзывы: {int(stats['avg_reviews'])}\n\n"
+        f"💪 >300 отзывов: {stats['strong']}\n"
+        f"🔥 >1000 отзывов: {stats['ultra']}\n"
+        f"📈 Средние: {int(stats['avg_reviews'])}\n"
     )
-
-    if stats["ultra"] > 5:
-        msg += "🚫 Высокая конкуренция"
-    elif stats["strong"] > 10:
-        msg += "🟡 Средняя конкуренция"
-    else:
-        msg += "🟢 Низкая конкуренция"
 
     await update.message.reply_text(msg)
 
-# --------------------
+
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
