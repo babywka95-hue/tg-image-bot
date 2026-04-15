@@ -28,7 +28,7 @@ def webhook():
 
 if __name__ == "__main__":
     # Устанавливаем webhook при старте
-    webhook_url = f"https://<YOUR_RENDER_SUBDOMAIN>.onrender.com{WEBHOOK_PATH}"
+    webhook_url = f"https://<https://tg-image-bot-1-nrpn.onrender.com>.onrender.com{WEBHOOK_PATH}"
     bot.delete_webhook()
     bot.set_webhook(url=webhook_url)
     
