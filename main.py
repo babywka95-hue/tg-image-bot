@@ -8,7 +8,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 app = FastAPI()
 bot = Bot(token=TOKEN)
-
 application = Application.builder().token(TOKEN).build()
 
 started = False
@@ -30,7 +29,11 @@ async def webhook(request: Request):
 
     if not started:
         await application.initialize()
-        await application.bot.set_webhook(WEBHOOK_URL)
+
+        # 🔥 ВАЖНАЯ ЗАЩИТА
+        if WEBHOOK_URL:
+            await application.bot.set_webhook(WEBHOOK_URL)
+
         started = True
 
     data = await request.json()
