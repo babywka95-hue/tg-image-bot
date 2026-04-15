@@ -1,50 +1,60 @@
 import os
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ---------------- CONFIG ----------------
-TOKEN = os.getenv("BOT_TOKEN")
-URL = os.getenv("PUBLIC_URL")  # https://xxxx.onrender.com
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+PUBLIC_URL = os.environ.get("PUBLIC_URL")
 
-if not TOKEN:
-    raise ValueError("BOT_TOKEN is not set")
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN is missing")
 
-# ---------------- APP ----------------
-app = Flask(__name__)
+if not PUBLIC_URL:
+    raise Exception("PUBLIC_URL is missing")
 
-telegram_app = Application.builder().token(TOKEN).build()
+# ---------------- TELEGRAM APP ----------------
+app_telegram = Application.builder().token(BOT_TOKEN).build()
 
 # ---------------- HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает ✅")
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📷 Фото получено! Бот работает.")
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Ты написал: {update.message.text}")
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+app_telegram.add_handler(CommandHandler("start", start))
+app_telegram.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-# ---------------- WEBHOOK ROUTE ----------------
+# ---------------- FLASK ----------------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK"
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
 
-    telegram_app.update_queue.put_nowait(update)
+    update = Update.de_json(data, app_telegram.bot)
+
+    # ВАЖНО: это правильная очередь PTB
+    app_telegram.update_queue.put_nowait(update)
+
     return "ok"
 
-# ---------------- STARTUP ----------------
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running"
+# ---------------- SET WEBHOOK ----------------
+def setup_webhook():
+    url = f"{PUBLIC_URL}/webhook"
+    app_telegram.bot.set_webhook(url=url)
+    print("Webhook set:", url)
 
-def set_webhook():
-    webhook_url = f"{URL}/webhook"
-    telegram_app.bot.set_webhook(url=webhook_url)
-    print("Webhook set:", webhook_url)
-
-# ---------------- RUN ----------------
+# ---------------- START ----------------
 if __name__ == "__main__":
-    set_webhook()
+    setup_webhook()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
