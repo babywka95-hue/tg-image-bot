@@ -1,75 +1,68 @@
 import os
 import io
-import json
-import requests
+import time
 from PIL import Image
 import torch
 import clip
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# ----------------------
+# ---------------------
 TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-# ----------------------
-CATEGORIES = [
-    "epilator",
-    "hair dryer",
-    "sneakers",
-    "smart watch",
-    "backpack",
-    "headphones"
-]
+CATEGORIES = ["epilator", "hair dryer", "sneakers", "smart watch", "backpack", "headphones"]
 
-# ----------------------
-def wb_mobile_search(query, limit=20):
-    """
-    Парсинг мобильной версии WB.
-    JSON содержит реальные отзывы и рейтинг.
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
-        "Accept": "application/json"
-    }
+# ---------------------
+def setup_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    driver = webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
+    return driver
 
-    url = f"https://search.wb.ru/exactmatch/ru/m/catalog?query={query}&page=1&limit={limit}"
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        products = []
+# ---------------------
+def parse_wb(query, limit=10):
+    driver = setup_driver()
+    query_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={query}"
+    driver.get(query_url)
+    time.sleep(3)  # дождаться загрузки страницы JS
 
-        for item in data.get("data", {}).get("products", []):
-            feedbacks = item.get("feedbacks", 0)
-            rating = item.get("rating", 0)
-            if feedbacks is None: feedbacks = 0
-            if rating is None: rating = 0
+    products = []
+    items = driver.find_elements(By.CSS_SELECTOR, "div.product-card")
+    for item in items[:limit]:
+        try:
+            name = item.get_attribute("data-name")
+            price = item.get_attribute("data-sale")
+            reviews = int(item.get_attribute("data-feedbacks") or 0)
+            rating = float(item.get_attribute("data-rating") or 0)
+            link = item.get_attribute("href")
+            if reviews >= 1 and rating >= 4.0:
+                products.append({
+                    "name": name,
+                    "price": price,
+                    "reviews": reviews,
+                    "rating": rating,
+                    "link": link
+                })
+        except:
+            continue
 
-            products.append({
-                "id": item.get("id"),
-                "name": item.get("name"),
-                "price": item.get("salePriceU", 0)/100,
-                "reviews": feedbacks,
-                "rating": rating,
-                "link": f"https://www.wildberries.ru/catalog/{item.get('id')}/detail.aspx"
-            })
+    driver.quit()
+    return products
 
-        return products
-    except Exception as e:
-        print("WB mobile search error:", e)
-        return []
-
-# ----------------------
-def filter_products(products):
-    filtered = [p for p in products if p["reviews"] > 0 and p["rating"] >= 4.0]
-    filtered.sort(key=lambda x: (x["rating"], x["reviews"]), reverse=True)
-    return filtered
-
-# ----------------------
+# ---------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -78,7 +71,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     image_input = preprocess(image).unsqueeze(0).to(device)
 
-    await update.message.reply_text("🔍 Анализирую фото...")
+    await update.message.reply_text("🔍 Определяю категорию товара...")
 
     with torch.no_grad():
         text_inputs = clip.tokenize(CATEGORIES).to(device)
@@ -94,23 +87,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"🔑 Категория: {query}")
 
-    products = wb_mobile_search(query, limit=20)
-    products = filter_products(products)
-
+    products = parse_wb(query, limit=10)
     if not products:
         await update.message.reply_text("❌ Нет товаров с рейтингом ≥4 и отзывами ≥1")
         return
 
     msg = "🛍 ТОП товаров WB:\n\n"
-    for p in products[:5]:
+    for p in products:
         msg += f"• {p['name']}\n"
-        msg += f"⭐ Рейтинг: {p['rating']} | 💬 Отзывы: {p['reviews']}\n"
+        msg += f"⭐ {p['rating']} | 💬 {p['reviews']}\n"
         msg += f"💰 {p['price']} ₽\n"
         msg += f"🔗 {p['link']}\n\n"
 
     await update.message.reply_text(msg)
 
-# ----------------------
+# ---------------------
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
