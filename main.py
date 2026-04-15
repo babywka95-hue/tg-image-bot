@@ -1,100 +1,50 @@
 import os
-import requests
 from flask import Flask, request
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
-# =====================
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# ---------------- CONFIG ----------------
+TOKEN = os.getenv("BOT_TOKEN")
+URL = os.getenv("PUBLIC_URL")  # https://xxxx.onrender.com
 
 if not TOKEN:
-    raise Exception("No TELEGRAM_TOKEN")
+    raise ValueError("BOT_TOKEN is not set")
 
-bot = Bot(token=TOKEN)
+# ---------------- APP ----------------
 app = Flask(__name__)
 
-# =====================
-def wb_search(query):
-    url = f"https://search.wb.ru/exactmatch/ru/common/v5/search?query={query}&page=1&limit=30"
-    r = requests.get(url, timeout=10)
-    if r.status_code != 200:
-        return []
-    return r.json().get("data", {}).get("products", [])
+telegram_app = Application.builder().token(TOKEN).build()
 
-# =====================
-def analyze(products):
-    if not products:
-        return None
+# ---------------- HANDLERS ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Бот работает ✅")
 
-    total = len(products)
-    strong = sum(1 for p in products if (p.get("feedbacks", 0) or 0) > 300)
-    ultra = sum(1 for p in products if (p.get("feedbacks", 0) or 0) > 1000)
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Ты написал: {update.message.text}")
 
-    return {
-        "total": total,
-        "strong": strong,
-        "ultra": ultra,
-    }
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# =====================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or "product"
-
-    await update.message.reply_text("🔍 ищу данные WB...")
-
-    products = wb_search(text)
-    stats = analyze(products)
-
-    if not stats:
-        await update.message.reply_text("❌ нет данных WB API")
-        return
-
-    await update.message.reply_text(
-        f"📊 WB\n"
-        f"📦 товаров: {stats['total']}\n"
-        f"💪 сильные: {stats['strong']}\n"
-        f"🔥 монстры: {stats['ultra']}"
-    )
-
-# =====================
-application = Application.builder().token(TOKEN).build()
-application.add_handler(MessageHandler(filters.TEXT, handle_message))
-
-# =====================
+# ---------------- WEBHOOK ROUTE ----------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(), bot)
-    application.update_queue.put_nowait(update)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+
+    telegram_app.update_queue.put_nowait(update)
     return "ok"
 
-# =====================
+# ---------------- STARTUP ----------------
 @app.route("/", methods=["GET"])
 def home():
-    return "OK"
+    return "Bot is running"
 
-# =====================
-import asyncio
+def set_webhook():
+    webhook_url = f"{URL}/webhook"
+    telegram_app.bot.set_webhook(url=webhook_url)
+    print("Webhook set:", webhook_url)
 
-async def set_webhook():
-    url = f"{WEBHOOK_URL}/webhook"
-    await bot.delete_webhook()
-    await bot.set_webhook(url=url)
-    print("Webhook set:", url)
-
-if __name__ == "__main__":
-    # запускаем Flask в отдельном потоке
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(set_webhook())
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-
-# =====================
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     set_webhook()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
