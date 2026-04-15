@@ -107,12 +107,21 @@ def webhook():
     return "ok"
 
 # --------------------
-def set_webhook():
-    url = f"{WEBHOOK_URL}/webhook"
-    bot.delete_webhook()
-    bot.set_webhook(url=url)
-    print("Webhook set:", url)
+import asyncio
 
+def set_webhook():
+    if not WEBHOOK_URL:
+        raise Exception("WEBHOOK_URL not set")
+
+    url = f"{WEBHOOK_URL}/webhook"
+
+    async def setup():
+        await bot.delete_webhook()
+        await bot.set_webhook(url=url)
+
+    asyncio.run(setup())
+
+    print("Webhook set:", url)
 # --------------------
 if __name__ == "__main__":
     set_webhook()
