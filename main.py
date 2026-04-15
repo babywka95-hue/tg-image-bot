@@ -16,14 +16,13 @@ TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# AI MODEL (CLIP)
+# LOAD CLIP MODEL
 # ======================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
 # ======================
-# БАЗА ТОВАРОВ (потом заменим на WB)
-# reviewCount имитируем
+# DEMO DATABASE (потом заменишь на WB)
 # ======================
 PRODUCTS = [
     {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
@@ -34,6 +33,9 @@ PRODUCTS = [
     {"name": "travel backpack", "reviews": 89, "rating": 4.5},
 ]
 
+# ======================
+# TEXT EMBEDDINGS
+# ======================
 text_inputs = clip.tokenize([p["name"] for p in PRODUCTS]).to(device)
 
 with torch.no_grad():
@@ -41,13 +43,37 @@ with torch.no_grad():
     text_features /= text_features.norm(dim=-1, keepdim=True)
 
 # ======================
-# FILTER (ОТЗЫВЫ)
+# FILTER FUNCTION
 # ======================
-def filter_products(product_list):
-    return [p for p in product_list if p["reviews"] > 0]
+def filter_products(products):
+    filtered = []
+
+    for p in products:
+        name = p.get("name", "")
+        reviews = p.get("reviews", 0)
+        rating = p.get("rating", 0)
+
+        # обязательные условия
+        if not name:
+            continue
+        if reviews <= 0:
+            continue
+        if rating <= 0:
+            continue
+        if rating < 4.0:
+            continue
+        if reviews < 5:
+            continue
+
+        filtered.append(p)
+
+    # сортировка по качеству
+    filtered.sort(key=lambda x: (x["rating"], x["reviews"]), reverse=True)
+
+    return filtered
 
 # ======================
-# HANDLE PHOTO
+# PHOTO HANDLER
 # ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
@@ -79,13 +105,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "rating": product["rating"]
         })
 
-    # фильтр по отзывам
+    # 🔥 ФИЛЬТР
     filtered = filter_products(results)
 
     if not filtered:
-        await update.message.reply_text("❌ Нет товаров с отзывами")
+        await update.message.reply_text("❌ Нет товаров с отзывами и рейтингом")
         return
 
+    # ======================
+    # OUTPUT
+    # ======================
     msg = "🛍 ТОП товары с отзывами:\n\n"
 
     for p in filtered:
@@ -98,6 +127,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
+# ======================
+# MAIN
 # ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
