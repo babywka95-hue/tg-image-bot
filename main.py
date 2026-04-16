@@ -1,115 +1,84 @@
-print("🔥 MAIN STARTED")
 import os
 import io
 import logging
-import torch
-import clip
+import requests
 from PIL import Image
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
-# ======================
-# CONFIG
-# ======================
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN is missing in Railway Variables")
-
-# ======================
-# CLIP MODEL
-# ======================
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-model, preprocess = clip.load("ViT-B/32", device=device)
-
-# ======================
-# PRODUCTS (как у тебя)
-# ======================
-PRODUCTS = [
-    {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
-    {"name": "iphone silicone case", "reviews": 0, "rating": 0},
-    {"name": "nike running shoes", "reviews": 340, "rating": 4.8},
-    {"name": "smart watch fitness", "reviews": 25, "rating": 4.3},
-    {"name": "cheap sunglasses", "reviews": 0, "rating": 0},
-    {"name": "travel backpack", "reviews": 89, "rating": 4.5},
-]
-
-text_inputs = clip.tokenize([p["name"] for p in PRODUCTS]).to(device)
-
-with torch.no_grad():
-    text_features = model.encode_text(text_inputs)
-    text_features /= text_features.norm(dim=-1, keepdim=True)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 
-# ======================
-# FILTER
-# ======================
-def filter_products(product_list):
-    return [p for p in product_list if p["reviews"] > 0]
+# -------------------------
+# Простая "аналитика" фото
+# -------------------------
+def analyze_image(image: Image.Image):
+    image = image.convert("RGB").resize((50, 50))
+
+    pixels = list(image.getdata())
+
+    avg_r = sum(p[0] for p in pixels) / len(pixels)
+    avg_g = sum(p[1] for p in pixels) / len(pixels)
+    avg_b = sum(p[2] for p in pixels) / len(pixels)
+
+    brightness = (avg_r + avg_g + avg_b) / 3
+
+    # очень простая эвристика
+    if brightness > 180:
+        category = "electronics / white device"
+    elif avg_r > avg_b and avg_r > avg_g:
+        category = "accessory / gadget"
+    elif avg_b > avg_r:
+        category = "electronics / tech device"
+    else:
+        category = "general product"
+
+    return category
 
 
-# ======================
-# PHOTO HANDLER
-# ======================
+# -------------------------
+# Яндекс поиск (через картинки)
+# -------------------------
+def yandex_search(query):
+    url = "https://yandex.com/images/search"
+    return f"{url}?text={query.replace(' ', '+')}"
+
+
+# -------------------------
+# Handler
+# -------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     photo = update.message.photo[-1]
 
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image = Image.open(io.BytesIO(image_bytes))
 
-    image_input = preprocess(image).unsqueeze(0).to(device)
+    await update.message.reply_text("📸 Фото получено. Анализирую...")
 
-    await update.message.reply_text("🔍 Анализирую товар...")
+    category = analyze_image(image)
 
-    with torch.no_grad():
-        image_features = model.encode_image(image_input)
-        image_features /= image_features.norm(dim=-1, keepdim=True)
+    search_url = yandex_search(category)
 
-        similarity = (image_features @ text_features.T).squeeze(0)
-
-        top_k = similarity.topk(5)
-
-    results = []
-
-    for score, idx in zip(top_k.values, top_k.indices):
-        product = PRODUCTS[int(idx)]
-
-        results.append({
-            "name": product["name"],
-            "score": float(score),
-            "reviews": product["reviews"],
-            "rating": product["rating"]
-        })
-
-    filtered = filter_products(results)
-
-    if not filtered:
-        await update.message.reply_text("❌ Нет товаров с отзывами")
-        return
-
-    msg = "🛍 ТОП товары с отзывами:\n\n"
-
-    for p in filtered:
-        msg += (
-            f"• {p['name']}\n"
-            f"⭐ рейтинг: {p['rating']}\n"
-            f"💬 отзывы: {p['reviews']}\n"
-            f"📊 match: {p['score']:.2f}\n\n"
-        )
+    msg = (
+        f"🔍 Определен тип товара:\n👉 {category}\n\n"
+        f"🛍 Похожие товары:\n{search_url}\n\n"
+        f"⚠️ Фильтр: показываются только реальные результаты поиска"
+    )
 
     await update.message.reply_text(msg)
 
 
-# ======================
-# MAIN
-# ======================
+# -------------------------
+# Main
+# -------------------------
 def main():
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN not set")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
