@@ -6,7 +6,7 @@ import clip
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-
+print("🔥 NEW CODE VERSION 3 RUNNING")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 if not TOKEN:
