@@ -1,7 +1,6 @@
 import os
 import io
 import logging
-import requests
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -11,79 +10,81 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 
-# -------------------------
-# Простая "аналитика" фото
-# -------------------------
-def analyze_image(image: Image.Image):
-    image = image.convert("RGB").resize((50, 50))
+print("🔥 MAIN STARTED (NO TORCH VERSION)")
 
+
+# ----------------------------
+# Анализ изображения (без AI)
+# ----------------------------
+def analyze_image(image: Image.Image):
+    image = image.convert("RGB").resize((40, 40))
     pixels = list(image.getdata())
 
-    avg_r = sum(p[0] for p in pixels) / len(pixels)
-    avg_g = sum(p[1] for p in pixels) / len(pixels)
-    avg_b = sum(p[2] for p in pixels) / len(pixels)
+    r = sum(p[0] for p in pixels) / len(pixels)
+    g = sum(p[1] for p in pixels) / len(pixels)
+    b = sum(p[2] for p in pixels) / len(pixels)
 
-    brightness = (avg_r + avg_g + avg_b) / 3
+    brightness = (r + g + b) / 3
 
-    # очень простая эвристика
-    if brightness > 180:
-        category = "electronics / white device"
-    elif avg_r > avg_b and avg_r > avg_g:
-        category = "accessory / gadget"
-    elif avg_b > avg_r:
-        category = "electronics / tech device"
+    # простая, но стабильная логика
+    if brightness > 200:
+        return "electronics / white device"
+    elif r > b and r > g:
+        return "accessories / small gadgets"
+    elif b > r:
+        return "tech / electronics device"
     else:
-        category = "general product"
-
-    return category
+        return "general product"
 
 
-# -------------------------
-# Яндекс поиск (через картинки)
-# -------------------------
-def yandex_search(query):
-    url = "https://yandex.com/images/search"
-    return f"{url}?text={query.replace(' ', '+')}"
+# ----------------------------
+# Яндекс поиск картинок
+# ----------------------------
+def yandex_search(query: str):
+    return f"https://yandex.com/images/search?text={query.replace(' ', '+')}"
 
 
-# -------------------------
-# Handler
-# -------------------------
+# ----------------------------
+# Telegram handler
+# ----------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
+    try:
+        photo = update.message.photo[-1]
 
-    file = await context.bot.get_file(photo.file_id)
-    image_bytes = await file.download_as_bytearray()
+        file = await context.bot.get_file(photo.file_id)
+        image_bytes = await file.download_as_bytearray()
 
-    image = Image.open(io.BytesIO(image_bytes))
+        image = Image.open(io.BytesIO(image_bytes))
 
-    await update.message.reply_text("📸 Фото получено. Анализирую...")
+        await update.message.reply_text("📸 Фото получено. Анализирую...")
 
-    category = analyze_image(image)
+        category = analyze_image(image)
+        search_url = yandex_search(category)
 
-    search_url = yandex_search(category)
+        response = (
+            f"🔍 Категория товара:\n👉 {category}\n\n"
+            f"🛍 Похожие товары:\n{search_url}\n\n"
+            f"⚠️ Поиск через Яндекс Images (без API ограничений)"
+        )
 
-    msg = (
-        f"🔍 Определен тип товара:\n👉 {category}\n\n"
-        f"🛍 Похожие товары:\n{search_url}\n\n"
-        f"⚠️ Фильтр: показываются только реальные результаты поиска"
-    )
+        await update.message.reply_text(response)
 
-    await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 
-# -------------------------
-# Main
-# -------------------------
+# ----------------------------
+# MAIN
+# ----------------------------
 def main():
     if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN not set")
+        raise ValueError("TELEGRAM_TOKEN is NOT set")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    print("Bot started")
+    print("🚀 BOT IS RUNNING")
     app.run_polling()
 
 
