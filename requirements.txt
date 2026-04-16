@@ -1,8 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot==21.6
+Pillow
+torch==2.2.2
+git+https://github.com/openai/CLIP.git
 requests
-pillow
-torch
-torchvision
-ftfy
-regex
-tqdm
