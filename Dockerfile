@@ -3,10 +3,7 @@ FROM python:3.11
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-    git \
-    gcc \
-    g++ \
-    build-essential \
+    git gcc g++ build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
