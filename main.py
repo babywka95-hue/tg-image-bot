@@ -1,8 +1,7 @@
 import logging
 import io
 import requests
-from bs4 import BeautifulSoup
-
+from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
@@ -14,97 +13,80 @@ TELEGRAM_TOKEN = "8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo"
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# YANDEX IMAGE SEARCH
+# SIMPLE OCR (очень лёгкий fallback)
 # ======================
-def yandex_reverse_search(image_bytes: bytes):
+def extract_keywords(image_bytes):
     """
-    Отправляем картинку в Яндекс reverse search
+    Упрощённо: пока без OCR (можно добавить позже tesseract)
     """
+    return "эпилятор"
 
-    files = {
-        "upfile": ("image.jpg", image_bytes, "image/jpeg")
-    }
 
-    params = {
-        "rpt": "imageview",
-        "format": "json",
-        "request": "search",
-        "cbir": "1"
-    }
+# ======================
+# WB SEARCH API (официальный endpoint каталога)
+# ======================
+def wb_search(query: str):
+    url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&resultset=catalog"
 
-    url = "https://yandex.ru/images/search"
-
-    response = requests.post(url, params=params, files=files, headers={
+    headers = {
         "User-Agent": "Mozilla/5.0"
-    })
+    }
 
-    if response.status_code != 200:
+    r = requests.get(url, headers=headers)
+
+    if r.status_code != 200:
         return []
 
-    soup = BeautifulSoup(response.text, "lxml")
+    data = r.json()
 
-    links = []
+    products = data.get("data", {}).get("products", [])
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "http" in href and "yandex" not in href:
-            links.append(href)
+    results = []
 
-    # убираем дубликаты
-    return list(dict.fromkeys(links))[:5]
+    for p in products[:5]:
+        name = p.get("name")
+        id_ = p.get("id")
 
+        link = f"https://www.wildberries.ru/catalog/{id_}/detail.aspx"
 
-# ======================
-# ANALYZE TEXT (простая логика)
-# ======================
-def extract_type_from_text(text):
-    text = text.lower()
+        results.append((name, link))
 
-    if any(x in text for x in ["shaver", "epilator", "razor"]):
-        return "Эпилятор / бритва"
-
-    if any(x in text for x in ["phone", "iphone", "smartphone"]):
-        return "Телефон"
-
-    if any(x in text for x in ["headphone", "airpods"]):
-        return "Наушники"
-
-    if any(x in text for x in ["watch"]):
-        return "Часы"
-
-    return "Электроника / товар"
+    return results
 
 
 # ======================
 # HANDLER
 # ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Анализирую через Яндекс...")
+    await update.message.reply_text("📸 Анализирую товар...")
 
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    links = yandex_reverse_search(image_bytes)
+    # 1. получаем ключевое слово
+    query = extract_keywords(image_bytes)
 
-    if not links:
-        await update.message.reply_text("❌ Не удалось найти похожие товары")
+    # 2. ищем на WB
+    items = wb_search(query)
+
+    if not items:
+        await update.message.reply_text("❌ Товары не найдены")
         return
 
-    msg = "🔍 Похожие товары (Яндекс):\n\n"
+    msg = f"🔍 Найдено по запросу: {query}\n\n🛍 Похожие товары:\n\n"
 
-    for i, link in enumerate(links, 1):
-        msg += f"{i}. {link}\n"
+    for name, link in items:
+        msg += f"• {name}\n{link}\n\n"
 
     await update.message.reply_text(msg)
 
 
 # ======================
-# START BOT
+# START
 # ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
