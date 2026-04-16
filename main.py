@@ -1,123 +1,97 @@
-import logging
 import io
-import requests
+import logging
+import torch
+import clip
+from PIL import Image
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # ======================
-# CONFIG
+# ВСТАВЬ СЮДА ТОКЕН
 # ======================
 TELEGRAM_TOKEN = "8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo"
 
 logging.basicConfig(level=logging.INFO)
 
-# ======================
-# AI (реальный анализ через HF)
-# ======================
-def classify(image_bytes):
-    API = "https://api-inference.huggingface.co/models/google/vit-base-patch16-224"
+device = "cpu"
 
-    r = requests.post(API, data=image_bytes)
+model, preprocess = clip.load("ViT-B/32", device=device)
+model.eval()
 
-    try:
-        data = r.json()
-        if isinstance(data, list):
-            return data[0]["label"].lower()
-    except:
-        pass
+PRODUCTS = [
+    {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
+    {"name": "iphone silicone case", "reviews": 0, "rating": 0},
+    {"name": "nike running shoes", "reviews": 340, "rating": 4.8},
+    {"name": "smart watch fitness", "reviews": 25, "rating": 4.3},
+    {"name": "cheap sunglasses", "reviews": 0, "rating": 0},
+    {"name": "travel backpack", "reviews": 89, "rating": 4.5},
+]
 
-    return "electronic device"
+with torch.no_grad():
+    text_inputs = clip.tokenize([p["name"] for p in PRODUCTS]).to(device)
+    text_features = model.encode_text(text_inputs)
+    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
+def filter_products(items):
+    return [p for p in items if p["reviews"] > 10 and p["rating"] > 0]
 
-# ======================
-# WB SEARCH
-# ======================
-def wb_search(query):
-    url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={query}&resultset=catalog"
-
-    r = requests.get(url)
-
-    if r.status_code != 200:
-        return []
-
-    data = r.json()
-    products = data.get("data", {}).get("products", [])
-
-    results = []
-
-    for p in products[:5]:
-        name = p.get("name")
-        id_ = p.get("id")
-
-        if not name or not id_:
-            continue
-
-        link = f"https://www.wildberries.ru/catalog/{id_}/detail.aspx"
-        results.append((name, link))
-
-    return results
-
-
-# ======================
-# MAP CLEAN
-# ======================
-def clean_query(label):
-    label = label.lower()
-
-    if any(x in label for x in ["shaver", "epilator", "razor"]):
-        return "эпилятор"
-
-    if any(x in label for x in ["phone", "mobile"]):
-        return "смартфон"
-
-    if any(x in label for x in ["headphone", "earphone"]):
-        return "наушники"
-
-    if "watch" in label:
-        return "смарт часы"
-
-    return "электроника"
-
-
-# ======================
-# HANDLER
-# ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Анализирую фото...")
+    await update.message.reply_text("🔍 Анализирую товар...")
 
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    # 1. AI classification
-    label = classify(image_bytes)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image = image.resize((224, 224))
 
-    # 2. clean query
-    query = clean_query(label)
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-    # 3. WB search
-    items = wb_search(query)
+    with torch.no_grad():
+        image_features = model.encode_image(image_input)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
-    msg = f"🔍 Определено: {query}\n\n🛍 Похожие товары:\n\n"
+        similarity = (image_features @ text_features.T).squeeze(0)
+        probs = similarity.softmax(dim=0)
 
-    if not items:
-        msg += "Товары не найдены"
-    else:
-        for name, link in items:
-            msg += f"• {name}\n{link}\n\n"
+        top_k = torch.topk(probs, k=5)
+
+    results = []
+
+    for score, idx in zip(top_k.values, top_k.indices):
+        p = PRODUCTS[idx]
+        results.append({
+            "name": p["name"],
+            "reviews": p["reviews"],
+            "rating": p["rating"],
+            "score": float(score)
+        })
+
+    results = filter_products(results)
+
+    if not results:
+        await update.message.reply_text("❌ Нет товаров с отзывами")
+        return
+
+    msg = "🛍 ТОП товары:\n\n"
+
+    for r in results:
+        msg += (
+            f"• {r['name']}\n"
+            f"⭐ {r['rating']}\n"
+            f"💬 {r['reviews']}\n"
+            f"📊 match: {r['score']:.3f}\n\n"
+        )
 
     await update.message.reply_text(msg)
 
-
-# ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
