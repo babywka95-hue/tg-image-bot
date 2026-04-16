@@ -1,132 +1,116 @@
 import os
 import io
 import logging
+import torch
+import clip
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-from sentence_transformers import SentenceTransformer, util
+# ======================
+# CONFIG
+# ======================
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN is NOT set")
 
 logging.basicConfig(level=logging.INFO)
 
-# ======================
-# TOKEN
-# ======================
-TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN not set")
+print("🔥 BOT STARTED")
 
 # ======================
-# MODEL (замена CLIP, но стабильная)
+# MODEL (CLIP)
 # ======================
-model = SentenceTransformer("all-MiniLM-L6-v2")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model, preprocess = clip.load("ViT-B/32", device=device)
 
 # ======================
-# ТВОЯ БАЗА ТОВАРОВ
+# SIMPLE PRODUCT DB (замени потом на WB API)
 # ======================
 PRODUCTS = [
-    {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
-    {"name": "iphone silicone case", "reviews": 0, "rating": 0},
-    {"name": "nike running shoes", "reviews": 340, "rating": 4.8},
-    {"name": "smart watch fitness", "reviews": 25, "rating": 4.3},
-    {"name": "cheap sunglasses", "reviews": 0, "rating": 0},
-    {"name": "travel backpack", "reviews": 89, "rating": 4.5},
+    {"name": "wireless headphones", "url": "https://wildberries.ru", "score_boost": 1.0},
+    {"name": "electric shaver epilator", "url": "https://wildberries.ru", "score_boost": 1.2},
+    {"name": "smartphone", "url": "https://wildberries.ru", "score_boost": 1.0},
+    {"name": "power bank", "url": "https://wildberries.ru", "score_boost": 1.0},
+    {"name": "smart watch", "url": "https://wildberries.ru", "score_boost": 1.0},
+    {"name": "backpack", "url": "https://wildberries.ru", "score_boost": 1.0},
 ]
 
-product_texts = [p["name"] for p in PRODUCTS]
-product_embeddings = model.encode(product_texts, convert_to_tensor=True)
+text_inputs = clip.tokenize([p["name"] for p in PRODUCTS]).to(device)
 
-
-# ======================
-# FILTER (как у тебя)
-# ======================
-def filter_products(items):
-    return [p for p in items if p["reviews"] > 0]
-
+with torch.no_grad():
+    text_features = model.encode_text(text_inputs)
+    text_features /= text_features.norm(dim=-1, keepdim=True)
 
 # ======================
-# "ПСЕВДО-CLIP" анализ изображения
-# (реально работает стабильно)
+# FILTER (убираем мусор)
 # ======================
-def image_to_text(image: Image.Image):
-    image = image.convert("RGB")
-    w, h = image.size
-
-    # простая визуальная эвристика
-    aspect = w / h
-
-    if aspect > 1.2:
-        return "modern electronic device horizontal gadget"
-    elif aspect < 0.8:
-        return "handheld vertical device beauty tool"
-    else:
-        return "consumer electronic product compact device"
-
+def is_valid_product(name: str) -> bool:
+    bad = ["unknown", "general", "thing", "object"]
+    return not any(b in name.lower() for b in bad)
 
 # ======================
-# HANDLER
+# PHOTO HANDLER
 # ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
-
     file = await context.bot.get_file(photo.file_id)
+
     image_bytes = await file.download_as_bytearray()
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    image = Image.open(io.BytesIO(image_bytes))
+    await update.message.reply_text("📸 Анализирую фото...")
 
-    await update.message.reply_text("📸 Фото получено, анализирую...")
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-    # 1. превращаем фото в текст
-    query = image_to_text(image)
+    with torch.no_grad():
+        image_features = model.encode_image(image_input)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
 
-    # 2. ищем похожие товары
-    query_embedding = model.encode(query, convert_to_tensor=True)
+        similarity = (image_features @ text_features.T).squeeze(0)
 
-    scores = util.cos_sim(query_embedding, product_embeddings)[0]
-
-    top_results = scores.topk(5)
+        top_k = similarity.topk(3)
 
     results = []
-    for score, idx in zip(top_results.values, top_results.indices):
-        p = PRODUCTS[int(idx)]
+    for score, idx in zip(top_k.values, top_k.indices):
+        product = PRODUCTS[idx]
+
+        if not is_valid_product(product["name"]):
+            continue
+
+        final_score = float(score) * product["score_boost"]
+
         results.append({
-            "name": p["name"],
-            "score": float(score),
-            "reviews": p["reviews"],
-            "rating": p["rating"]
+            "name": product["name"],
+            "url": product["url"],
+            "score": final_score
         })
 
-    # 3. фильтр мусора
-    filtered = filter_products(results)
-
-    if not filtered:
-        await update.message.reply_text("❌ Нет товаров с отзывами")
+    if not results:
+        await update.message.reply_text("❌ Не удалось определить товар")
         return
 
-    msg = "🛍 ТОП товары с отзывами:\n\n"
+    # ======================
+    # RESPONSE
+    # ======================
+    msg = "🛍 Похожие товары:\n\n"
 
-    for p in filtered:
-        msg += (
-            f"• {p['name']}\n"
-            f"⭐ рейтинг: {p['rating']}\n"
-            f"💬 отзывы: {p['reviews']}\n"
-            f"📊 match: {p['score']:.2f}\n\n"
-        )
+    for r in results:
+        msg += f"• {r['name']}\n{r['url']}\n📊 match: {r['score']:.2f}\n\n"
 
     await update.message.reply_text(msg)
 
-
 # ======================
-# START
+# START BOT
 # ======================
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    print("Bot started")
+    print("🚀 RUNNING")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
