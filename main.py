@@ -1,29 +1,31 @@
 import os
 import io
 import logging
+import torch
+import clip
 from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-from sentence_transformers import SentenceTransformer, util
-
+# ======================
+# CONFIG
+# ======================
 logging.basicConfig(level=logging.INFO)
 
-# ======================
-# TOKEN
-# ======================
 TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN not set")
+    raise ValueError("TELEGRAM_TOKEN is missing in Railway Variables")
 
 # ======================
-# MODEL (замена CLIP, но стабильная)
+# CLIP MODEL
 # ======================
-model = SentenceTransformer("all-MiniLM-L6-v2")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+model, preprocess = clip.load("ViT-B/32", device=device)
 
 # ======================
-# ТВОЯ БАЗА ТОВАРОВ
+# PRODUCTS (как у тебя)
 # ======================
 PRODUCTS = [
     {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
@@ -34,70 +36,56 @@ PRODUCTS = [
     {"name": "travel backpack", "reviews": 89, "rating": 4.5},
 ]
 
-product_texts = [p["name"] for p in PRODUCTS]
-product_embeddings = model.encode(product_texts, convert_to_tensor=True)
+text_inputs = clip.tokenize([p["name"] for p in PRODUCTS]).to(device)
+
+with torch.no_grad():
+    text_features = model.encode_text(text_inputs)
+    text_features /= text_features.norm(dim=-1, keepdim=True)
 
 
 # ======================
-# FILTER (как у тебя)
+# FILTER
 # ======================
-def filter_products(items):
-    return [p for p in items if p["reviews"] > 0]
-
-
-# ======================
-# "ПСЕВДО-CLIP" анализ изображения
-# (реально работает стабильно)
-# ======================
-def image_to_text(image: Image.Image):
-    image = image.convert("RGB")
-    w, h = image.size
-
-    # простая визуальная эвристика
-    aspect = w / h
-
-    if aspect > 1.2:
-        return "modern electronic device horizontal gadget"
-    elif aspect < 0.8:
-        return "handheld vertical device beauty tool"
-    else:
-        return "consumer electronic product compact device"
+def filter_products(product_list):
+    return [p for p in product_list if p["reviews"] > 0]
 
 
 # ======================
-# HANDLER
+# PHOTO HANDLER
 # ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     photo = update.message.photo[-1]
 
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    image = Image.open(io.BytesIO(image_bytes))
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    await update.message.reply_text("📸 Фото получено, анализирую...")
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-    # 1. превращаем фото в текст
-    query = image_to_text(image)
+    await update.message.reply_text("🔍 Анализирую товар...")
 
-    # 2. ищем похожие товары
-    query_embedding = model.encode(query, convert_to_tensor=True)
+    with torch.no_grad():
+        image_features = model.encode_image(image_input)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
 
-    scores = util.cos_sim(query_embedding, product_embeddings)[0]
+        similarity = (image_features @ text_features.T).squeeze(0)
 
-    top_results = scores.topk(5)
+        top_k = similarity.topk(5)
 
     results = []
-    for score, idx in zip(top_results.values, top_results.indices):
-        p = PRODUCTS[int(idx)]
+
+    for score, idx in zip(top_k.values, top_k.indices):
+        product = PRODUCTS[int(idx)]
+
         results.append({
-            "name": p["name"],
+            "name": product["name"],
             "score": float(score),
-            "reviews": p["reviews"],
-            "rating": p["rating"]
+            "reviews": product["reviews"],
+            "rating": product["rating"]
         })
 
-    # 3. фильтр мусора
     filtered = filter_products(results)
 
     if not filtered:
@@ -118,10 +106,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================
-# START
+# MAIN
 # ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
