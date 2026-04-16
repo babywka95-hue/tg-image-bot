@@ -1,4 +1,9 @@
 python-telegram-bot==20.7
 pillow
 requests
-sentence-transformers
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
+torch
+torchvision
