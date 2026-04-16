@@ -1,86 +1,82 @@
 import os
 import logging
-import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from PIL import Image
+import io
+
+import torch
+import clip
+
+# ======================
+# CONFIG
+# ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+# ======================
+# LOAD AI MODEL (CLIP)
+# ======================
 
-# =========================
-# 1. ВЫТАСКИВАЕМ ТЕГИ ИЗ ФОТО (БЕЗ AI)
-# =========================
-def fake_image_understanding():
-    # пока без ML — стабильно
-    return "shopping item"
+device = "cpu"  # ⚠️ ВАЖНО: Render = CPU (иначе OOM / падения)
 
-# =========================
-# 2. WB SEARCH
-# =========================
-def wb_search(query):
-    try:
-        url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
-        params = {"query": query, "resultset": "catalog", "limit": 5}
-        headers = {"User-Agent": "Mozilla/5.0"}
+model, preprocess = clip.load("ViT-B/32", device=device)
 
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        data = r.json()
+# тестовая база товаров
+PRODUCTS = [
+    "wireless headphones black",
+    "iphone case silicone",
+    "nike running shoes",
+    "smart watch sport",
+    "backpack travel bag",
+    "sunglasses fashion"
+]
 
-        products = data.get("data", {}).get("products", [])
+text_inputs = clip.tokenize(PRODUCTS).to(device)
 
-        results = []
-        for p in products:
-            results.append({
-                "name": p.get("name"),
-                "price": p.get("salePriceU", 0) // 100,
-                "link": f"https://www.wildberries.ru/catalog/{p['id']}/detail.aspx"
-            })
+with torch.no_grad():
+    text_features = model.encode_text(text_inputs)
+    text_features /= text_features.norm(dim=-1, keepdim=True)
 
-        return results
 
-    except Exception as e:
-        print("WB ERROR:", e)
-        return []
-
-# =========================
-# HANDLER
-# =========================
+# ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     photo = update.message.photo[-1]
 
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    await update.message.reply_text("🔍 Анализирую фото...")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-    # ⚡ пока без CLIP (стабильно)
-    query = fake_image_understanding()
+    await update.message.reply_text("🔍 Анализирую товар...")
 
-    await update.message.reply_text("🧠 Ищу похожие товары...")
+    with torch.no_grad():
+        image_features = model.encode_image(image_input)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
 
-    products = wb_search(query)
+        similarity = (image_features @ text_features.T).squeeze(0)
 
-    if not products:
-        await update.message.reply_text("❌ Ничего не найдено")
-        return
+        top_k = similarity.topk(3)
 
-    msg = "🛍 Найденные товары:\n\n"
+    msg = "🛍 Похожие товары:\n\n"
 
-    for p in products:
-        msg += f"• {p['name']}\n💰 {p['price']} ₽\n🔗 {p['link']}\n\n"
+    for score, idx in zip(top_k.values, top_k.indices):
+        msg += f"• {PRODUCTS[idx]} (match {score.item():.2f})\n"
 
-    await update.message.reply_text(msg[:4000])
+    await update.message.reply_text(msg)
 
-# =========================
-# MAIN
-# =========================
+
+# ======================
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Bot started")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
