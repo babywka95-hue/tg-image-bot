@@ -1,5 +1,5 @@
-flask==3.1.0
+flask
 python-telegram-bot==21.6
-requests==2.32.3
-Pillow==10.4.0
-beautifulsoup4==4.12.3
+requests
+pillow
+openai
