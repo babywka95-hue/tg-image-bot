@@ -2,10 +2,3 @@ python-telegram-bot==20.7
 pillow
 requests
 sentence-transformers
-torch
-python-telegram-bot==20.7
-pillow
-requests
-torch
-sentence-transformers
-transformers
