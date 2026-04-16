@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 # ======================
 # TOKEN
 # ======================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set")
