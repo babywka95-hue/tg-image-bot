@@ -1,136 +1,118 @@
 import os
-import io
 import requests
+import torch
 from PIL import Image
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from flask import Flask, request
+
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, MessageHandler, filters, ContextTypes
+
+import clip
 
 # =====================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # можно не ставить
+# CONFIG
+# =====================
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_SECRET = TOKEN
+
+bot = Bot(token=TOKEN)
+
+app = Flask(__name__)
 
 # =====================
-def wb_search(query, limit=10):
+# MODEL (CLIP)
+# =====================
+device = "cpu"
+model, preprocess = clip.load("ViT-B/32", device=device)
+
+# =====================
+# WB SEARCH (простая версия)
+# =====================
+def search_wb(query):
+    url = f"https://search.wb.ru/exactmatch/ru/common/v5/search?query={query}"
+    r = requests.get(url, timeout=10)
+    data = r.json()
+
+    products = []
     try:
-        url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
-        params = {
-            "query": query,
-            "page": 1,
-            "limit": limit,
-            "appType": 1,
-            "curr": "rub",
-            "dest": -1257786
-        }
-
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        products = data.get("data", {}).get("products", [])
-        results = []
-
-        for p in products:
-            id_ = p.get("id")
-            name = p.get("name")
-            price = p.get("salePriceU", 0) // 100
-
-            link = f"https://www.wildberries.ru/catalog/{id_}/detail.aspx"
-
-            results.append(f"📦 {name}\n💰 {price} ₽\n🔗 {link}\n")
-
-        return results
-
-    except Exception as e:
-        print("WB error:", e)
-        return []
-
-
-# =====================
-def vision_to_query(image_bytes: bytes) -> str:
-    """
-    Превращаем фото → текстовый запрос
-    """
-
-    # 🔥 если есть OpenAI — будет реально "Google Lens"
-    if OPENAI_API_KEY:
-        try:
-            import base64
-
-            b64 = base64.b64encode(image_bytes).decode()
-
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Определи товар на фото и дай короткий поисковый запрос для Wildberries (3-6 слов на русском)."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                        ]
-                    }
-                ],
-                "max_tokens": 50
-            }
-
-            r = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=20
+        for item in data["data"]["products"][:5]:
+            products.append(
+                f"https://www.wildberries.ru/catalog/{item['id']}/detail.aspx"
             )
+    except:
+        pass
 
-            return r.json()["choices"][0]["message"]["content"].strip()
-
-        except Exception as e:
-            print("Vision error:", e)
-
-    # fallback если нет API
-    return "женский товар одежда аксессуар"
+    return products
 
 
 # =====================
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        img_bytes = await file.download_as_bytearray()
+# IMAGE ANALYSIS
+# =====================
+def analyze_image(image_path):
+    image = preprocess(Image.open(image_path)).unsqueeze(0).to(device)
 
-        await update.message.reply_text("🔍 Анализирую фото...")
+    text = clip.tokenize([
+        "dress",
+        "t-shirt",
+        "shoes",
+        "bag",
+        "jacket",
+        "phone case",
+        "watch",
+        "pants"
+    ]).to(device)
 
-        query = vision_to_query(img_bytes)
+    with torch.no_grad():
+        logits_per_image, logits_per_text = model(image, text)
+        probs = logits_per_image.softmax(dim=-1).cpu().numpy()[0]
 
-        await update.message.reply_text(f"🔎 Поиск: {query}")
+    labels = ["dress","t-shirt","shoes","bag","jacket","phone case","watch","pants"]
+    best = labels[probs.argmax()]
 
-        results = wb_search(query)
-
-        if not results:
-            await update.message.reply_text("❌ Ничего не найдено")
-            return
-
-        msg = "🛍 РЕЗУЛЬТАТЫ WB:\n\n" + "\n".join(results[:5])
-
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        print("handler error:", e)
+    return best
 
 
 # =====================
-def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN not set")
+# TELEGRAM HANDLER
+# =====================
+def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.photo[-1].get_file()
+    path = "image.jpg"
+    file.download(path)
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    update.message.reply_text("🔍 Ищу похожие товары...")
 
-    print("Bot started")
-    app.run_polling()
+    label = analyze_image(path)
+    links = search_wb(label)
+
+    if not links:
+        update.message.reply_text("❌ Ничего не найдено")
+        return
+
+    result = "🛍 Найденные товары:\n\n" + "\n".join(links)
+    update.message.reply_text(result)
 
 
+# =====================
+# FLASK ROUTE (WEBHOOK)
+# =====================
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(), bot)
+    dispatcher.process_update(update)
+    return "ok"
+
+
+# =====================
+# INIT DISPATCHER
+# =====================
+dispatcher = Dispatcher(bot=bot, update_queue=None)
+dispatcher.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+
+# =====================
+# START SERVER (ВАЖНО ДЛЯ RENDER)
+# =====================
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
