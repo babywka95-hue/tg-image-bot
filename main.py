@@ -1,80 +1,123 @@
 import logging
-import os
+import io
+import requests
+from PIL import Image
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
-# ==========================================
-# TOKEN
-# ==========================================
+# ======================
+# CONFIG
+# ======================
 TELEGRAM_TOKEN = "8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo"
 
-# ==========================================
-# LOGGING
-# ==========================================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+HF_API_URL = "https://api-inference.huggingface.co/models/google/vit-base-patch16-224"
+HF_TOKEN = ""  # можно пустым (free tier работает, но медленнее)
 
-# ==========================================
-# ФЕЙК БАЗА ПОХОЖИХ ТОВАРОВ
-# Можно потом заменить на WB API / Parser
-# ==========================================
+logging.basicConfig(level=logging.INFO)
+
+# ======================
+# HF REQUEST
+# ======================
+def classify_image(image_bytes: bytes):
+    headers = {}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    response = requests.post(
+        HF_API_URL,
+        headers=headers,
+        data=image_bytes
+    )
+
+    if response.status_code != 200:
+        return "unknown"
+
+    data = response.json()
+
+    # HF возвращает список классов
+    if isinstance(data, list) and len(data) > 0:
+        return data[0]["label"].lower()
+
+    return "unknown"
+
+
+# ======================
+# MAP TO WB CATEGORY
+# ======================
+def map_to_category(label: str):
+    label = label.lower()
+
+    if any(x in label for x in ["phone", "mobile"]):
+        return "phone"
+
+    if any(x in label for x in ["headphone", "earphone", "speaker"]):
+        return "audio"
+
+    if any(x in label for x in ["shaver", "razor", "clipper"]):
+        return "epilator"
+
+    if any(x in label for x in ["watch"]):
+        return "watch"
+
+    if any(x in label for x in ["keyboard", "mouse", "computer"]):
+        return "computer"
+
+    return "general"
+
+
+# ======================
+# WB FAKE LINKS (потом заменишь API)
+# ======================
 PRODUCTS = {
-    "эпилятор": [
-        ("Эпилятор Braun Silk-epil 9", "https://www.wildberries.ru/"),
-        ("Фотоэпилятор IPL домашний", "https://www.wildberries.ru/"),
-        ("Женский триммер для тела", "https://www.wildberries.ru/")
+    "epilator": [
+        ("Эпилятор Braun Silk-epil", "https://www.wildberries.ru/"),
+        ("Фотоэпилятор IPL", "https://www.wildberries.ru/"),
+        ("Триммер женский", "https://www.wildberries.ru/")
     ],
-    "наушники": [
-        ("Беспроводные наушники TWS", "https://www.wildberries.ru/"),
-        ("Игровая гарнитура RGB", "https://www.wildberries.ru/"),
-        ("Bluetooth гарнитура", "https://www.wildberries.ru/")
+    "audio": [
+        ("Bluetooth наушники TWS", "https://www.wildberries.ru/"),
+        ("Игровые наушники", "https://www.wildberries.ru/"),
+        ("Портативная колонка", "https://www.wildberries.ru/")
     ],
-    "часы": [
-        ("Смарт часы AMOLED", "https://www.wildberries.ru/"),
-        ("Фитнес браслет", "https://www.wildberries.ru/"),
-        ("Умные часы спортивные", "https://www.wildberries.ru/")
-    ],
-    "телефон": [
-        ("Чехол для iPhone", "https://www.wildberries.ru/"),
-        ("PowerBank 20000mah", "https://www.wildberries.ru/"),
+    "phone": [
+        ("Чехол iPhone", "https://www.wildberries.ru/"),
+        ("PowerBank 20000", "https://www.wildberries.ru/"),
         ("Защитное стекло", "https://www.wildberries.ru/")
+    ],
+    "watch": [
+        ("Смарт часы", "https://www.wildberries.ru/"),
+        ("Фитнес браслет", "https://www.wildberries.ru/")
+    ],
+    "computer": [
+        ("Игровая клавиатура", "https://www.wildberries.ru/"),
+        ("Беспроводная мышь", "https://www.wildberries.ru/")
+    ],
+    "general": [
+        ("Товар WB", "https://www.wildberries.ru/")
     ]
 }
 
-# ==========================================
-# УМНОЕ ОПРЕДЕЛЕНИЕ ПО ПОДПИСИ/ТЕКСТУ
-# ==========================================
-def detect_product(caption: str):
-    if not caption:
-        return "телефон"
 
-    text = caption.lower()
-
-    if "эпил" in text or "бритв" in text:
-        return "эпилятор"
-
-    if "науш" in text or "airpods" in text:
-        return "наушники"
-
-    if "час" in text or "watch" in text:
-        return "часы"
-
-    return "телефон"
-
-# ==========================================
-# PHOTO HANDLER
-# ==========================================
+# ======================
+# HANDLER
+# ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Фото получено. Анализирую...")
+    await update.message.reply_text("📸 Анализирую фото...")
 
-    caption = update.message.caption if update.message.caption else ""
+    photo = update.message.photo[-1]
 
-    category = detect_product(caption)
-    items = PRODUCTS.get(category, [])
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = await file.download_as_bytearray()
 
-    msg = f"🔍 Определен товар: {category}\n\n"
+    # HF classify
+    label = classify_image(image_bytes)
+
+    category = map_to_category(label)
+    items = PRODUCTS.get(category, PRODUCTS["general"])
+
+    msg = f"🔍 AI определил: {label}\n"
+    msg += f"📦 Категория: {category}\n\n"
     msg += "🛍 Похожие товары:\n\n"
 
     for name, link in items:
@@ -82,28 +125,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
-# ==========================================
-# START
-# ==========================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет 👋\n"
-        "Отправь фото товара.\n"
-        "Если хочешь точнее анализ — подпиши фото:\n"
-        "Например: эпилятор / наушники / часы"
-    )
 
-# ==========================================
-# MAIN
-# ==========================================
+# ======================
+# START
+# ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
     print("Bot started")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
