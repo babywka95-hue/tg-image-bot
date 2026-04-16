@@ -1,4 +1,4 @@
 python-telegram-bot==21.6
 Pillow
-requests
-numpy
+torch
+git+https://github.com/openai/CLIP.git
