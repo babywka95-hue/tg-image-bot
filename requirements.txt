@@ -1,5 +1,5 @@
-flask
 python-telegram-bot==21.6
+torch
+clip @ git+https://github.com/openai/CLIP.git
+Pillow
 requests
-pillow
-openai
