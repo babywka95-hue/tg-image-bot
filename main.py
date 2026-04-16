@@ -34,11 +34,15 @@ telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 # ==========================
 # WEBHOOK
 # ==========================
+import asyncio
+
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, bot)
-    await telegram_app.process_update(update)
+
+    asyncio.run(telegram_app.process_update(update))
+
     return "ok"
 
 @app.route("/")
