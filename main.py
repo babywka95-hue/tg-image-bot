@@ -7,7 +7,11 @@ from telegram.ext import Application, MessageHandler, filters
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(TOKEN)
+
 telegram_app = Application.builder().token(TOKEN).build()
+
+import asyncio
+asyncio.run(telegram_app.initialize()))
 
 app = Flask(__name__)
 
