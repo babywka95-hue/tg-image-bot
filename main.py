@@ -1,98 +1,31 @@
 import os
-import re
 import asyncio
 import requests
-from io import BytesIO
+import torch
+import clip
 from PIL import Image
+from io import BytesIO
 from flask import Flask, request
 
 from telegram import Bot, Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters
 
-# ==========================================
+# =========================
 # CONFIG
-# ==========================================
+# =========================
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
-telegram_app = Application.builder().token(TOKEN).build()
 app = Flask(__name__)
+telegram_app = Application.builder().token(TOKEN).build()
 
-# ==========================================
-# OCR API (free)
-# ==========================================
-OCR_KEY = "helloworld"   # бесплатный demo key
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ==========================================
-# START
-# ==========================================
-async def start(update, context):
-    await update.message.reply_text(
-        "📸 Отправь фото товара.\n"
-        "Я найду похожие товары на Wildberries."
-    )
+model, preprocess = clip.load("ViT-B/32", device=device)
 
-# ==========================================
-# OCR FROM IMAGE
-# ==========================================
-def read_text_from_image(image_bytes):
-    try:
-        files = {
-            "filename": ("image.jpg", image_bytes)
-        }
-
-        data = {
-            "apikey": OCR_KEY,
-            "language": "rus+eng",
-            "isOverlayRequired": False
-        }
-
-        r = requests.post(
-            "https://api.ocr.space/parse/image",
-            files=files,
-            data=data,
-            timeout=30
-        )
-
-        result = r.json()
-
-        text = result["ParsedResults"][0]["ParsedText"]
-
-        return text.strip()
-
-    except:
-        return ""
-
-# ==========================================
-# SMART QUERY
-# ==========================================
-def detect_query(text):
-    text = text.lower()
-
-    words = re.findall(r"[a-zA-Zа-яА-Я0-9]+", text)
-
-    blacklist = {
-        "size", "made", "wash", "cotton",
-        "xl", "xxl", "l", "m", "s",
-        "руб", "цена", "новый"
-    }
-
-    good = []
-
-    for w in words:
-        if len(w) > 2 and w not in blacklist:
-            good.append(w)
-
-    query = " ".join(good[:4])
-
-    if not query:
-        query = "женская одежда"
-
-    return query
-
-# ==========================================
+# =========================
 # WB SEARCH
-# ==========================================
+# =========================
 def wb_search(query):
     try:
         url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
@@ -103,125 +36,129 @@ def wb_search(query):
             "limit": 5
         }
 
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
 
-        r = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=15
-        )
-
+        r = requests.get(url, params=params, headers=headers, timeout=10)
         data = r.json()
 
         products = data.get("data", {}).get("products", [])
 
-        result = []
+        out = []
 
-        for item in products[:5]:
-            pid = item["id"]
-            name = item["name"]
-            price = item.get("salePriceU", 0) // 100
+        for p in products[:5]:
+            pid = p["id"]
+            name = p["name"]
+            price = p.get("salePriceU", 0) // 100
 
             link = f"https://www.wildberries.ru/catalog/{pid}/detail.aspx"
 
-            result.append(
-                f"🛍 {name}\n"
-                f"💰 {price} ₽\n"
-                f"🔗 {link}"
+            out.append(
+                f"🛍 {name}\n💰 {price} ₽\n🔗 {link}"
             )
 
-        return result
+        return out
 
     except Exception as e:
         print("WB ERROR:", e)
         return []
 
-# ==========================================
+# =========================
+# CLIP CATEGORY DETECTION
+# =========================
+CATEGORIES = [
+    "epilator",
+    "shoes sneakers",
+    "handbag",
+    "smartphone",
+    "watch",
+    "hair trimmer",
+    "cosmetics",
+    "kitchen appliance",
+    "vacuum cleaner",
+    "clothing dress",
+]
+
+def classify_image(image):
+    image_input = preprocess(image).unsqueeze(0).to(device)
+
+    text_inputs = clip.tokenize(CATEGORIES).to(device)
+
+    with torch.no_grad():
+        image_features = model.encode_image(image_input)
+        text_features = model.encode_text(text_inputs)
+
+        logits = image_features @ text_features.T
+        probs = logits.softmax(dim=-1).cpu().numpy()[0]
+
+    best_idx = probs.argmax()
+
+    return CATEGORIES[best_idx]
+
+# =========================
 # PHOTO HANDLER
-# ==========================================
+# =========================
 async def photo_handler(update, context):
     chat_id = update.effective_chat.id
 
-    await bot.send_message(chat_id, "🔍 Анализирую фото...")
+    await bot.send_message(chat_id, "🔍 Анализирую изображение...")
 
     try:
         photo = update.message.photo[-1]
-
         file = await bot.get_file(photo.file_id)
 
         image_bytes = await file.download_as_bytearray()
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
-        # OCR text
-        text = read_text_from_image(image_bytes)
-
-        # detect query
-        query = detect_query(text)
+        category = classify_image(image)
 
         await bot.send_message(
             chat_id,
-            f"🧠 Нашёл запрос:\n{query}"
+            f"🧠 Определено: {category}"
         )
 
-        goods = wb_search(query)
+        goods = wb_search(category)
 
         if not goods:
-            await bot.send_message(
-                chat_id,
-                "❌ Ничего не найдено."
-            )
+            await bot.send_message(chat_id, "❌ Ничего не найдено")
             return
 
-        answer = "🛒 Похожие товары:\n\n"
-        answer += "\n\n".join(goods)
+        text = "🛒 Похожие товары:\n\n" + "\n\n".join(goods)
 
-        await bot.send_message(chat_id, answer[:4000])
+        await bot.send_message(chat_id, text[:4000])
 
     except Exception as e:
         print("PHOTO ERROR:", e)
-        await bot.send_message(
-            chat_id,
-            "❌ Ошибка обработки фото."
-        )
+        await bot.send_message(chat_id, "❌ Ошибка обработки")
 
-# ==========================================
-# HANDLERS
-# ==========================================
+# =========================
+# START
+# =========================
+async def start(update, context):
+    await update.message.reply_text("📸 Отправь фото товара")
+
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(
-    MessageHandler(filters.PHOTO, photo_handler)
-)
+telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
 asyncio.run(telegram_app.initialize())
 
-# ==========================================
+# =========================
 # WEBHOOK
-# ==========================================
+# =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, bot)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, bot)
 
-        asyncio.run(
-            telegram_app.process_update(update)
-        )
-
-        return "ok"
-
-    except Exception as e:
-        print("WEBHOOK ERROR:", e)
-        return "error"
+    asyncio.run(telegram_app.process_update(update))
+    return "ok"
 
 @app.route("/")
 def home():
-    return "bot alive"
+    return "Lens PRO 2.0 running"
 
-# ==========================================
-# START SERVER
-# ==========================================
+# =========================
+# RUN
+# =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
