@@ -3,88 +3,128 @@ import io
 import logging
 from PIL import Image
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+
+from sentence_transformers import SentenceTransformer, util
 
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
+# ======================
+# TOKEN
+# ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set")
+
+# ======================
+# MODEL (замена CLIP, но стабильная)
+# ======================
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ======================
+# ТВОЯ БАЗА ТОВАРОВ
+# ======================
+PRODUCTS = [
+    {"name": "wireless headphones black", "reviews": 120, "rating": 4.6},
+    {"name": "iphone silicone case", "reviews": 0, "rating": 0},
+    {"name": "nike running shoes", "reviews": 340, "rating": 4.8},
+    {"name": "smart watch fitness", "reviews": 25, "rating": 4.3},
+    {"name": "cheap sunglasses", "reviews": 0, "rating": 0},
+    {"name": "travel backpack", "reviews": 89, "rating": 4.5},
+]
+
+product_texts = [p["name"] for p in PRODUCTS]
+product_embeddings = model.encode(product_texts, convert_to_tensor=True)
 
 
-print("🔥 MAIN STARTED (NO TORCH VERSION)")
+# ======================
+# FILTER (как у тебя)
+# ======================
+def filter_products(items):
+    return [p for p in items if p["reviews"] > 0]
 
 
-# ----------------------------
-# Анализ изображения (без AI)
-# ----------------------------
-def analyze_image(image: Image.Image):
-    image = image.convert("RGB").resize((40, 40))
-    pixels = list(image.getdata())
+# ======================
+# "ПСЕВДО-CLIP" анализ изображения
+# (реально работает стабильно)
+# ======================
+def image_to_text(image: Image.Image):
+    image = image.convert("RGB")
+    w, h = image.size
 
-    r = sum(p[0] for p in pixels) / len(pixels)
-    g = sum(p[1] for p in pixels) / len(pixels)
-    b = sum(p[2] for p in pixels) / len(pixels)
+    # простая визуальная эвристика
+    aspect = w / h
 
-    brightness = (r + g + b) / 3
-
-    # простая, но стабильная логика
-    if brightness > 200:
-        return "electronics / white device"
-    elif r > b and r > g:
-        return "accessories / small gadgets"
-    elif b > r:
-        return "tech / electronics device"
+    if aspect > 1.2:
+        return "modern electronic device horizontal gadget"
+    elif aspect < 0.8:
+        return "handheld vertical device beauty tool"
     else:
-        return "general product"
+        return "consumer electronic product compact device"
 
 
-# ----------------------------
-# Яндекс поиск картинок
-# ----------------------------
-def yandex_search(query: str):
-    return f"https://yandex.com/images/search?text={query.replace(' ', '+')}"
-
-
-# ----------------------------
-# Telegram handler
-# ----------------------------
+# ======================
+# HANDLER
+# ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        photo = update.message.photo[-1]
+    photo = update.message.photo[-1]
 
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = await file.download_as_bytearray()
 
-        image = Image.open(io.BytesIO(image_bytes))
+    image = Image.open(io.BytesIO(image_bytes))
 
-        await update.message.reply_text("📸 Фото получено. Анализирую...")
+    await update.message.reply_text("📸 Фото получено, анализирую...")
 
-        category = analyze_image(image)
-        search_url = yandex_search(category)
+    # 1. превращаем фото в текст
+    query = image_to_text(image)
 
-        response = (
-            f"🔍 Категория товара:\n👉 {category}\n\n"
-            f"🛍 Похожие товары:\n{search_url}\n\n"
-            f"⚠️ Поиск через Яндекс Images (без API ограничений)"
+    # 2. ищем похожие товары
+    query_embedding = model.encode(query, convert_to_tensor=True)
+
+    scores = util.cos_sim(query_embedding, product_embeddings)[0]
+
+    top_results = scores.topk(5)
+
+    results = []
+    for score, idx in zip(top_results.values, top_results.indices):
+        p = PRODUCTS[int(idx)]
+        results.append({
+            "name": p["name"],
+            "score": float(score),
+            "reviews": p["reviews"],
+            "rating": p["rating"]
+        })
+
+    # 3. фильтр мусора
+    filtered = filter_products(results)
+
+    if not filtered:
+        await update.message.reply_text("❌ Нет товаров с отзывами")
+        return
+
+    msg = "🛍 ТОП товары с отзывами:\n\n"
+
+    for p in filtered:
+        msg += (
+            f"• {p['name']}\n"
+            f"⭐ рейтинг: {p['rating']}\n"
+            f"💬 отзывы: {p['reviews']}\n"
+            f"📊 match: {p['score']:.2f}\n\n"
         )
 
-        await update.message.reply_text(response)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+    await update.message.reply_text(msg)
 
 
-# ----------------------------
-# MAIN
-# ----------------------------
+# ======================
+# START
+# ======================
 def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("TELEGRAM_TOKEN is NOT set")
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    print("🚀 BOT IS RUNNING")
+    print("Bot started")
     app.run_polling()
 
 
