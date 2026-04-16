@@ -1,75 +1,30 @@
 import os
-import asyncio
+import logging
 import requests
-from io import BytesIO
+import torch
+import clip
+import io
 
-from flask import Flask, request
+from PIL import Image
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-from telegram import Bot, Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters
-
-from openai import OpenAI
-
-# =========================
+# ======================
 # CONFIG
-# =========================
-TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-bot = Bot(token=TOKEN)
-app = Flask(__name__)
-telegram_app = Application.builder().token(TOKEN).build()
+logging.basicConfig(level=logging.INFO)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ======================
+# CLIP MODEL
+# ======================
+device = "cpu"  # ⚠️ важно для Render (иначе OOM)
+model, preprocess = clip.load("ViT-B/32", device=device)
 
-# =========================
-# START
-# =========================
-async def start(update, context):
-    await update.message.reply_text(
-        "📸 Отправь фото товара — я найду точные аналоги на Wildberries"
-    )
-
-# =========================
-# VISION ANALYSIS
-# =========================
-def analyze_image(image_bytes):
-    try:
-        import base64
-
-        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Определи что на изображении. Верни только короткий поисковый запрос для интернет-магазина (1-4 слова)."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_b64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=20
-        )
-
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        print("VISION ERROR:", e)
-        return "товар"
-
-# =========================
-# WB SEARCH
-# =========================
+# ======================
+# WB SEARCH (реальная база)
+# ======================
 def wb_search(query):
     try:
         url = "https://search.wb.ru/exactmatch/ru/common/v5/search"
@@ -87,89 +42,104 @@ def wb_search(query):
 
         products = data.get("data", {}).get("products", [])
 
-        result = []
+        results = []
 
-        for p in products[:5]:
+        for p in products:
             pid = p["id"]
             name = p["name"]
             price = p.get("salePriceU", 0) // 100
 
             link = f"https://www.wildberries.ru/catalog/{pid}/detail.aspx"
 
-            result.append(
-                f"🛍 {name}\n💰 {price} ₽\n🔗 {link}"
-            )
+            results.append({
+                "name": name,
+                "price": price,
+                "link": link
+            })
 
-        return result
+        return results
 
     except Exception as e:
         print("WB ERROR:", e)
         return []
 
-# =========================
-# PHOTO HANDLER
-# =========================
-async def photo_handler(update, context):
-    chat_id = update.effective_chat.id
+# ======================
+# CLIP + WB SMART MATCH
+# ======================
+def clip_smart_query(image):
+    """CLIP превращает фото → текстовый запрос"""
 
-    await bot.send_message(chat_id, "🔍 Анализирую изображение...")
+    prompts = [
+        "epilator",
+        "women dress",
+        "smartphone",
+        "headphones",
+        "watch",
+        "shoes",
+        "bag",
+        "cosmetics",
+        "kitchen appliance",
+        "hair dryer"
+    ]
 
-    try:
-        photo = update.message.photo[-1]
+    text_tokens = clip.tokenize(prompts).to(device)
 
-        file = await bot.get_file(photo.file_id)
-        image_bytes = await file.download_as_bytearray()
+    with torch.no_grad():
+        image_input = preprocess(image).unsqueeze(0).to(device)
 
-        # 🔥 AI VISION
-        query = analyze_image(image_bytes)
+        image_features = model.encode_image(image_input)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
 
-        await bot.send_message(chat_id, f"🧠 Понял: {query}")
+        text_features = model.encode_text(text_tokens)
+        text_features /= text_features.norm(dim=-1, keepdim=True)
 
-        goods = wb_search(query)
+        similarity = (image_features @ text_features.T).squeeze(0)
 
-        if not goods:
-            await bot.send_message(chat_id, "❌ Ничего не найдено")
-            return
+        best_idx = similarity.argmax().item()
 
-        text = "🛒 Похожие товары:\n\n" + "\n\n".join(goods)
+        return prompts[best_idx]
 
-        await bot.send_message(chat_id, text[:4000])
+# ======================
+# HANDLER
+# ======================
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
 
-    except Exception as e:
-        print("PHOTO ERROR:", e)
-        await bot.send_message(chat_id, "❌ Ошибка обработки")
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = await file.download_as_bytearray()
 
-# =========================
-# HANDLERS
-# =========================
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-asyncio.run(telegram_app.initialize())
+    await update.message.reply_text("🔍 Анализирую фото...")
 
-# =========================
-# WEBHOOK
-# =========================
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, bot)
+    # CLIP → категория
+    query = clip_smart_query(image)
 
-        asyncio.run(telegram_app.process_update(update))
-        return "ok"
+    await update.message.reply_text(f"🧠 Понял: {query}")
 
-    except Exception as e:
-        print("WEBHOOK ERROR:", e)
-        return "error"
+    # WB search
+    products = wb_search(query)
 
-@app.route("/")
-def home():
-    return "PRO MAX LITE running"
+    if not products:
+        await update.message.reply_text("❌ Ничего не найдено")
+        return
 
-# =========================
-# RUN
-# =========================
+    msg = "🛍 Похожие товары:\n\n"
+
+    for p in products:
+        msg += f"• {p['name']}\n💰 {p['price']} ₽\n🔗 {p['link']}\n\n"
+
+    await update.message.reply_text(msg[:4000])
+
+# ======================
+# MAIN
+# ======================
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    print("Bot started")
+    app.run_polling()
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    main()
