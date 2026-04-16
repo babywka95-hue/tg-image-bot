@@ -1,7 +1,7 @@
 import logging
 import io
 import requests
-from PIL import Image
+from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -11,123 +11,96 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 # ======================
 TELEGRAM_TOKEN = "8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo"
 
-HF_API_URL = "https://api-inference.huggingface.co/models/google/vit-base-patch16-224"
-HF_TOKEN = ""  # можно пустым (free tier работает, но медленнее)
-
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# HF REQUEST
+# YANDEX IMAGE SEARCH
 # ======================
-def classify_image(image_bytes: bytes):
-    headers = {}
-    if HF_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+def yandex_reverse_search(image_bytes: bytes):
+    """
+    Отправляем картинку в Яндекс reverse search
+    """
 
-    response = requests.post(
-        HF_API_URL,
-        headers=headers,
-        data=image_bytes
-    )
+    files = {
+        "upfile": ("image.jpg", image_bytes, "image/jpeg")
+    }
+
+    params = {
+        "rpt": "imageview",
+        "format": "json",
+        "request": "search",
+        "cbir": "1"
+    }
+
+    url = "https://yandex.ru/images/search"
+
+    response = requests.post(url, params=params, files=files, headers={
+        "User-Agent": "Mozilla/5.0"
+    })
 
     if response.status_code != 200:
-        return "unknown"
+        return []
 
-    data = response.json()
+    soup = BeautifulSoup(response.text, "lxml")
 
-    # HF возвращает список классов
-    if isinstance(data, list) and len(data) > 0:
-        return data[0]["label"].lower()
+    links = []
 
-    return "unknown"
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "http" in href and "yandex" not in href:
+            links.append(href)
 
-
-# ======================
-# MAP TO WB CATEGORY
-# ======================
-def map_to_category(label: str):
-    label = label.lower()
-
-    if any(x in label for x in ["phone", "mobile"]):
-        return "phone"
-
-    if any(x in label for x in ["headphone", "earphone", "speaker"]):
-        return "audio"
-
-    if any(x in label for x in ["shaver", "razor", "clipper"]):
-        return "epilator"
-
-    if any(x in label for x in ["watch"]):
-        return "watch"
-
-    if any(x in label for x in ["keyboard", "mouse", "computer"]):
-        return "computer"
-
-    return "general"
+    # убираем дубликаты
+    return list(dict.fromkeys(links))[:5]
 
 
 # ======================
-# WB FAKE LINKS (потом заменишь API)
+# ANALYZE TEXT (простая логика)
 # ======================
-PRODUCTS = {
-    "epilator": [
-        ("Эпилятор Braun Silk-epil", "https://www.wildberries.ru/"),
-        ("Фотоэпилятор IPL", "https://www.wildberries.ru/"),
-        ("Триммер женский", "https://www.wildberries.ru/")
-    ],
-    "audio": [
-        ("Bluetooth наушники TWS", "https://www.wildberries.ru/"),
-        ("Игровые наушники", "https://www.wildberries.ru/"),
-        ("Портативная колонка", "https://www.wildberries.ru/")
-    ],
-    "phone": [
-        ("Чехол iPhone", "https://www.wildberries.ru/"),
-        ("PowerBank 20000", "https://www.wildberries.ru/"),
-        ("Защитное стекло", "https://www.wildberries.ru/")
-    ],
-    "watch": [
-        ("Смарт часы", "https://www.wildberries.ru/"),
-        ("Фитнес браслет", "https://www.wildberries.ru/")
-    ],
-    "computer": [
-        ("Игровая клавиатура", "https://www.wildberries.ru/"),
-        ("Беспроводная мышь", "https://www.wildberries.ru/")
-    ],
-    "general": [
-        ("Товар WB", "https://www.wildberries.ru/")
-    ]
-}
+def extract_type_from_text(text):
+    text = text.lower()
+
+    if any(x in text for x in ["shaver", "epilator", "razor"]):
+        return "Эпилятор / бритва"
+
+    if any(x in text for x in ["phone", "iphone", "smartphone"]):
+        return "Телефон"
+
+    if any(x in text for x in ["headphone", "airpods"]):
+        return "Наушники"
+
+    if any(x in text for x in ["watch"]):
+        return "Часы"
+
+    return "Электроника / товар"
 
 
 # ======================
 # HANDLER
 # ======================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Анализирую фото...")
+    await update.message.reply_text("📸 Анализирую через Яндекс...")
 
     photo = update.message.photo[-1]
-
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
 
-    # HF classify
-    label = classify_image(image_bytes)
+    links = yandex_reverse_search(image_bytes)
 
-    category = map_to_category(label)
-    items = PRODUCTS.get(category, PRODUCTS["general"])
+    if not links:
+        await update.message.reply_text("❌ Не удалось найти похожие товары")
+        return
 
-    msg = f"🔍 AI определил: {label}\n"
-    msg += f"📦 Категория: {category}\n\n"
-    msg += "🛍 Похожие товары:\n\n"
+    msg = "🔍 Похожие товары (Яндекс):\n\n"
 
-    for name, link in items:
-        msg += f"• {name}\n{link}\n\n"
+    for i, link in enumerate(links, 1):
+        msg += f"{i}. {link}\n"
 
     await update.message.reply_text(msg)
 
 
 # ======================
-# START
+# START BOT
 # ======================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
