@@ -1,3 +1,4 @@
+print("🔥 MAIN STARTED")
 import os
 import io
 import logging
