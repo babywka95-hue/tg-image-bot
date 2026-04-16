@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 
 logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("8665178501:AAHR4Asen0W9r3neZJn1Ll6fXZEQSvoApJo")
 
 
 print("🔥 MAIN STARTED (NO TORCH VERSION)")
