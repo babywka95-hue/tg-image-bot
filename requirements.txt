@@ -1,9 +1,7 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 python-telegram-bot==20.7
-tornado==6.4.2
 pillow
 requests
-torch==2.2.2+cpu
+torch
 ftfy
 regex
 tqdm
