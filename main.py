@@ -1,17 +1,8 @@
 import os
-import io
-import logging
-import torch
-import os
 
 import clip
 import torch
-from PIL import Image
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-print("🔥 NEW CODE VERSION 3 RUNNING")
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -22,17 +13,31 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN is NOT set")
+    PORT = int(os.getenv("PORT", "8080"))
+    def resolve_webhook_url() -> str | None:
+    explicit = os.getenv("WEBHOOK_URL")
+    if explicit:
+        return explicit.rstrip("/")
 
-logging.basicConfig(level=logging.INFO)
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", "8080"))
+    railway_static = os.getenv("RAILWAY_STATIC_URL")
+    if railway_static:
+        if railway_static.startswith("http"):
+            return railway_static.rstrip("/")
+        return f"https://{railway_static.strip('/')}"
 
-print("🔥 BOT STARTED")
+    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    if railway_domain:
+        return f"https://{railway_domain.strip('/')}"
+
+    return None
+    
+WEBHOOK_URL = resolve_webhook_url()
+
 logger.info("🔥 BOT STARTED")
+logger.info("Device: %s", "cuda" if torch.cuda.is_available() else "cpu")
 
 # Railway обычно работает в CPU-контейнере, поэтому оставляем авто-выбор.
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
 model, preprocess = clip.load("ViT-B/32", device=device)
 model = model.float()
 
@@ -50,6 +55,10 @@ text_inputs = clip.tokenize([p[0] for p in PRODUCTS]).to(device)
 with torch.no_grad():
     text_features = model.encode_text(text_inputs)
     text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Отправь фото, и я подберу похожие товары 🛍")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,7 +85,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🛍 Похожие товары:\n\n"
 
     for score, idx in zip(top_k.values, top_k.indices):
-        name, url = PRODUCTS[idx]
         name, url = PRODUCTS[int(idx)]
         msg += f"• {name}\n{url}\n📊 match: {float(score):.2f}\n\n"
 
@@ -85,21 +93,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-    print("🚀 RUNNING")
-    app.run_polling()
-    if WEBHOOK_URL:
+if WEBHOOK_URL:
         logger.info("🚀 RUNNING (webhook mode on port %s)", PORT)
+        logger.info("Webhook URL: %s/%s", WEBHOOK_URL, TOKEN)
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL.rstrip('/')}/{TOKEN}",
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
             drop_pending_updates=True,
         )
     else:
         logger.info("🚀 RUNNING (polling mode)")
+        logger.info(
+            "WEBHOOK_URL/RAILWAY_PUBLIC_DOMAIN not found. Using polling. "
+            "If you want webhook mode, set WEBHOOK_URL explicitly."
+        )
         app.run_polling(drop_pending_updates=True)
 
 
