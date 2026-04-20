@@ -2,71 +2,51 @@ import os
 import io
 import logging
 
-import clip
 import torch
+import clip
 from PIL import Image
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
+    ContextTypes,
     filters,
 )
 
-# ======================
+# =========================
 # LOGGING
-# ======================
+# =========================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ======================
+print("🔥 MAIN STARTED")
+
+# =========================
 # ENV
-# ======================
+# =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN is NOT set")
 
 PORT = int(os.getenv("PORT", "8080"))
 
-
-def resolve_webhook_url():
-    explicit = os.getenv("WEBHOOK_URL")
-    if explicit:
-        return explicit.rstrip("/")
-
-    railway_static = os.getenv("RAILWAY_STATIC_URL")
-    if railway_static:
-        if railway_static.startswith("http"):
-            return railway_static.rstrip("/")
-        return f"https://{railway_static.strip('/')}"
-
-    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
-    if railway_domain:
-        return f"https://{railway_domain.strip('/')}"
-
-    return None
-
-
-WEBHOOK_URL = resolve_webhook_url()
-
-# ======================
-# MODEL
-# ======================
-logger.info("🔥 BOT STARTED")
-
+# =========================
+# DEVICE
+# =========================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info("Device: %s", device)
 
-model, preprocess = clip.load("ViT-B/32", device=device)
-model = model.float()
+# =========================
+# LAZY LOAD MODEL
+# =========================
+model = None
+preprocess = None
+text_features = None
 
-# ======================
-# PRODUCTS
-# ======================
 PRODUCTS = [
     ("wireless headphones", "https://wildberries.ru"),
     ("electric shaver epilator", "https://wildberries.ru"),
@@ -76,25 +56,51 @@ PRODUCTS = [
     ("backpack", "https://wildberries.ru"),
 ]
 
-text_inputs = clip.tokenize([p[0] for p in PRODUCTS]).to(device)
 
-with torch.no_grad():
-    text_features = model.encode_text(text_inputs)
-    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+def load_model():
+    global model, preprocess, text_features
+
+    if model is not None:
+        return
+
+    logger.info("🔥 Loading CLIP model...")
+
+    model_loaded, preprocess_loaded = clip.load("ViT-B/32", device=device)
+    model_loaded = model_loaded.float()
+
+    text_inputs = clip.tokenize([p[0] for p in PRODUCTS]).to(device)
+
+    with torch.no_grad():
+        tf = model_loaded.encode_text(text_inputs)
+        tf = tf / tf.norm(dim=-1, keepdim=True)
+
+    model = model_loaded
+    preprocess = preprocess_loaded
+    text_features = tf
+
+    logger.info("✅ CLIP loaded")
 
 
-# ======================
-# HANDLERS
-# ======================
+# =========================
+# COMMANDS
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Отправь фото товара, и я найду похожие 🛍"
+        "Привет 👋\n\nОтправь фото товара, и я найду похожие товары."
     )
 
 
+# =========================
+# PHOTO HANDLER
+# =========================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
         return
+
+    await update.message.reply_text("📸 Анализирую фото...")
+
+    # Загружаем модель только при первом фото
+    load_model()
 
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
@@ -102,13 +108,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_bytes = await file.download_as_bytearray()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    await update.message.reply_text("📸 Анализирую фото...")
-
     image_input = preprocess(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
         image_features = model.encode_image(image_input)
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        image_features = image_features / image_features.norm(
+            dim=-1, keepdim=True
+        )
 
         similarity = (image_features @ text_features.T).squeeze(0)
         top_k = similarity.topk(3)
@@ -117,34 +123,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for score, idx in zip(top_k.values, top_k.indices):
         name, url = PRODUCTS[int(idx)]
-        msg += f"• {name}\n{url}\n📊 match: {float(score):.2f}\n\n"
+        msg += (
+            f"• {name}\n"
+            f"{url}\n"
+            f"📊 match: {float(score):.2f}\n\n"
+        )
 
     await update.message.reply_text(msg)
 
 
-# ======================
+# =========================
 # MAIN
-# ======================
+# =========================
 def main():
+    logger.info("🚀 BOT RUNNING (polling mode)")
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    if WEBHOOK_URL:
-        logger.info("🚀 RUNNING WEBHOOK MODE")
-        logger.info("Webhook: %s/%s", WEBHOOK_URL, TOKEN)
-
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-            drop_pending_updates=True,
-        )
-    else:
-        logger.info("🚀 RUNNING POLLING MODE")
-        app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
